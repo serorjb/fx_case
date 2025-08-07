@@ -27,7 +27,7 @@ from src.features_enhanced import EnhancedFeatureEngineer
 from src.models.garch_models import create_time_features
 
 # Import models
-from src.models.garman_kohlhagen import GarmanKohlhagen
+from src.models.gk_model import GarmanKohlhagen
 from src.models.gvv_model import GVVModel
 from src.models.sabr_model import SABRModel
 from src.models.ml_models import LightGBMModel

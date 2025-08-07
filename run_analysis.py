@@ -10,7 +10,7 @@ sys.path.append(str(Path(__file__).parent))
 
 from src.data_loader import FXDataLoader
 from src.features import FeatureEngineer
-from src.models.garman_kohlhagen import GarmanKohlhagen
+from src.models.gk_model import GarmanKohlhagen
 from src.models.gvv_model import GVVModel
 from src.models.sabr_model import SABRModel
 

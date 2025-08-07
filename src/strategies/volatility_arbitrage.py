@@ -3,14 +3,14 @@ Enhanced volatility arbitrage strategy with automated delta hedging
 """
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from strategies.base_strategy import BaseStrategy, Signal, Position
-from models.garman_kohlhagen import GarmanKohlhagen
-from models.gvv_model import GVVModel
+from src.strategies.base_strategy import BaseStrategy, Signal, Position
+from src.models.gk_model import GarmanKohlhagen
+from src.models.gvv_model import GVVModel
 from hedging import DeltaHedger
 
 class VolatilityArbitrageStrategy(BaseStrategy):

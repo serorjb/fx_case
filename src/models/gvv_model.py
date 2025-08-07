@@ -8,7 +8,7 @@ from typing import Dict, Tuple
 from scipy.stats import norm
 from scipy.optimize import brentq
 from .base_model import BaseOptionModel
-from .garman_kohlhagen import GarmanKohlhagen
+from .gk_model import GarmanKohlhagen
 
 
 class GVVModel(BaseOptionModel):
