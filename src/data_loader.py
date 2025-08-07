@@ -23,7 +23,7 @@ class FXDataLoader:
         self.fx_data = pd.read_parquet(self.fx_path)
 
         # todo: delete this line once done with testing
-        # self.fx_data = self.fx_data.tail(1500)
+        self.fx_data = self.fx_data.tail(650)
 
         print("Loading discount curves...")
         self.discount_data = pd.read_parquet(self.discount_path)

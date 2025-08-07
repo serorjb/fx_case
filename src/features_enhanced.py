@@ -108,18 +108,22 @@ class EnhancedFeatureEngineer(FeatureEngineer):
             print(f"Creating enhanced features for {pair}...")
 
             # Base features (with no look-ahead bias)
+            print("Creating base features...")
             base_features = super().create_all_features(data, pair, models)
 
             # GARCH features
+            print("Creating GARCH features...")
             garch_features = self.create_garch_features(data, pair)
 
             # Volatility comparison features
+            print("Creating volatility comparison features...")
             if models:
                 vol_comp_features = self.create_volatility_comparison_features(data, pair, models)
             else:
                 vol_comp_features = pd.DataFrame(index=data.index)
 
             # Time features
+            print("Creating time-based features...")
             time_features = create_time_features(data)
 
             # Combine all features

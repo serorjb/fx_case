@@ -49,7 +49,7 @@ class HMMRegimeDetector:
                 model = hmm.GaussianHMM(
                     n_components=self.n_states,
                     covariance_type="full",
-                    n_iter=1,
+                    n_iter=1,  # todo: reset to 200 for actual fitting
                     random_state=42,
                     tol=5e-2,
                     init_params=''  # disables automatic initialization,
@@ -332,10 +332,15 @@ class FeatureEngineer:
         all_features = pd.DataFrame(index=data.index)
 
         # Add all feature sets (all with lookback_only=True)
+        print(f"Creating volatility features for {pair}...")
         vol_features = self.create_volatility_features(data, lookback_only=True)
+        print(f"Creating skew features for {pair}...")
         skew_features = self.create_skew_features(data, lookback_only=True)
+        print(f"Creating carry features for {pair}...")
         carry_features = self.create_carry_features(data, lookback_only=True)
+        print(f"Creating technical features for {pair}...")
         tech_features = self.create_technical_features(data, lookback_only=True)
+        print(f"Creating regime features for {pair}...")
         regime_features = self.create_regime_features(data, lookback_only=True)
 
         # Add HMM regime features

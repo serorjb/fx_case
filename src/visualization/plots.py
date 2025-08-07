@@ -291,8 +291,8 @@ class TradingVisualizer:
             hovermode='x unified'
         )
 
-        fig.write_html(f"{self.results_dir}/vol_surface_{pair}.html")
-        print(f"Volatility surface saved to {self.results_dir}/vol_surface_{pair}.html")
+        fig.write_html(f"{self.results_dir}/vol_smile_{pair}.html")
+        print(f"Volatility surface saved to {self.results_dir}/vol_smile_{pair}.html")
 
     def create_performance_report(self, performance: Dict, trades_df: pd.DataFrame) -> None:
         """

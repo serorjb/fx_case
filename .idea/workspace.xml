@@ -5,12 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="47662d6b-a19f-409d-b0cf-7071c48186d1" name="Changes" comment="-">
-      <change afterPath="$PROJECT_DIR$/src/models/multi_model_strategies.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/visualization/multi_model_plots.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/data_loader.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/data_loader.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/features.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/features.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/features_enhanced.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/features_enhanced.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/models/multi_model_strategies.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/models/multi_model_strategies.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -279,7 +278,15 @@
       <option name="project" value="LOCAL" />
       <updated>1754581651883</updated>
     </task>
-    <option name="localTasksCounter" value="9" />
+    <task id="LOCAL-00009" summary="-">
+      <option name="closed" value="true" />
+      <created>1754583230296</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1754583230296</updated>
+    </task>
+    <option name="localTasksCounter" value="10" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
@@ -299,6 +306,11 @@
           <url>file://$PROJECT_DIR$/discount_curves.py</url>
           <line>102</line>
           <option name="timeStamp" value="7" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
+          <url>file://$PROJECT_DIR$/main.py</url>
+          <line>134</line>
+          <option name="timeStamp" value="9" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>

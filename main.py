@@ -15,6 +15,7 @@ import warnings
 import joblib
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
+from src.visualization.vol_surface_3d import create_enhanced_vol_surfaces
 
 warnings.filterwarnings('ignore')
 
@@ -537,6 +538,14 @@ class FXOptionsSystem:
                     print(f"   ✓ {pair} volatility surface")
                 except Exception as e:
                     print(f"   ⚠️  Could not create vol surface for {pair}: {e}")
+
+        # 8. 3D volatility surfaces for all pairs
+        print("\n📊 Creating 3D volatility surfaces...")
+        try:
+            create_enhanced_vol_surfaces(self.data, str(PLOTS_DIR))
+            print("   ✓ 3D volatility surfaces created")
+        except Exception as e:
+            print(f"   ⚠️ Could not create 3D vol surfaces: {e}")
 
     def save_all_results(self, all_results: Dict, combined_results: Dict, combined_trades: pd.DataFrame) -> None:
         """Save all results to files"""
