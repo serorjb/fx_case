@@ -4,22 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="47662d6b-a19f-409d-b0cf-7071c48186d1" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/fx_case.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/FRED/DTB1YR.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/FRED/DTB3.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/FRED/DTB4WK.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/FRED/DTB6.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/FRED/SOFR.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/FX.parquet" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/draft.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+    <list default="true" id="47662d6b-a19f-409d-b0cf-7071c48186d1" name="Changes" comment="-">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/discount_curves.py" beforeDir="false" afterPath="$PROJECT_DIR$/discount_curves.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/draft.py" beforeDir="false" afterPath="$PROJECT_DIR$/draft.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -48,8 +36,9 @@
   </component>
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
+    "Python.cme_ois (1).executor": "Run",
     "Python.cme_ois.executor": "Run",
-    "Python.draft.executor": "Debug",
+    "Python.draft.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "last_opened_file_path": "C:/Dev/fx_case/data/FRED"
   }
@@ -64,7 +53,7 @@
       <recent name="C:\Dev\fx_case\data" />
     </key>
   </component>
-  <component name="RunManager">
+  <component name="RunManager" selected="Python.draft">
     <configuration name="discount_curves" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="fx_case" />
       <option name="ENV_FILES" value="" />
@@ -133,9 +122,9 @@
     </configuration>
     <recent_temporary>
       <list>
-        <item itemvalue="Python.discount_curves" />
-        <item itemvalue="Python.discount_curves" />
         <item itemvalue="Python.draft" />
+        <item itemvalue="Python.discount_curves" />
+        <item itemvalue="Python.discount_curves" />
       </list>
     </recent_temporary>
   </component>
@@ -148,25 +137,47 @@
       <option name="presentableId" value="Default" />
       <updated>1754567407173</updated>
     </task>
+    <task id="LOCAL-00001" summary="initial commit">
+      <option name="closed" value="true" />
+      <created>1754571717220</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1754571717220</updated>
+    </task>
+    <task id="LOCAL-00002" summary="-">
+      <option name="closed" value="true" />
+      <created>1754571901937</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1754571901937</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="initial commit" />
+    <MESSAGE value="-" />
+    <option name="LAST_COMMIT_MESSAGE" value="-" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
       <breakpoints>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
-          <url>file://$PROJECT_DIR$/draft.py</url>
-          <line>25</line>
-          <option name="timeStamp" value="2" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
-          <url>file://$PROJECT_DIR$/cme_ois.py</url>
-          <line>58</line>
+          <url>file://$PROJECT_DIR$/discount_curves.py</url>
+          <line>60</line>
           <option name="timeStamp" value="4" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
-          <url>file://$PROJECT_DIR$/cme_ois.py</url>
+          <url>file://$PROJECT_DIR$/discount_curves.py</url>
           <line>102</line>
           <option name="timeStamp" value="7" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
+          <url>file://$PROJECT_DIR$/draft.py</url>
+          <line>3</line>
+          <option name="timeStamp" value="8" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>
