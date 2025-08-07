@@ -5,19 +5,19 @@ import numpy as np
 from scipy.stats import norm
 from scipy.optimize import minimize_scalar
 from typing import Dict, Tuple, Optional
+from .base_model import BaseOptionModel
 
-
-class GarmanKohlhagen:
+class GarmanKohlhagen(BaseOptionModel):
     """
     Garman-Kohlhagen model for pricing European FX options
     Extension of Black-Scholes for currency options
     """
 
     def __init__(self):
-        self.name = "Garman-Kohlhagen"
+        super().__init__("Garman-Kohlhagen")
 
     def price_option(self, S: float, K: float, T: float, r_d: float, r_f: float,
-                     sigma: float, option_type: str = 'call') -> float:
+                    sigma: float, option_type: str = 'call', **kwargs) -> float:
         """
         Price FX option using Garman-Kohlhagen model
 
@@ -41,7 +41,7 @@ class GarmanKohlhagen:
         if T <= 0:
             return max(0, S - K) if option_type == 'call' else max(0, K - S)
 
-        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
 
         if option_type == 'call':
@@ -52,14 +52,14 @@ class GarmanKohlhagen:
         return price
 
     def calculate_greeks(self, S: float, K: float, T: float, r_d: float, r_f: float,
-                         sigma: float, option_type: str = 'call') -> Dict[str, float]:
+                         sigma: float, option_type: str = 'call', **kwargs) -> Dict[str, float]:
         """Calculate option Greeks"""
 
         if T <= 0:
             return {'delta': 0, 'gamma': 0, 'vega': 0, 'theta': 0, 'rho': 0}
 
         sqrt_T = np.sqrt(T)
-        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
         d2 = d1 - sigma * sqrt_T
 
         # Common terms

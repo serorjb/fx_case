@@ -9,7 +9,6 @@ import lightgbm as lgb
 from typing import Dict, Tuple, Optional
 import joblib
 
-
 class LightGBMModel:
     """
     LightGBM model for option pricing and signal generation
@@ -52,8 +51,7 @@ class LightGBMModel:
                 vol_col = f'atm_vol_{tenor}'
                 features[f'vol_{tenor}'] = data[vol_col]
                 features[f'vol_{tenor}_ma_20'] = data[vol_col].rolling(20).mean()
-                features[f'vol_{tenor}_zscore'] = (data[vol_col] - features[f'vol_{tenor}_ma_20']) / data[
-                    vol_col].rolling(20).std()
+                features[f'vol_{tenor}_zscore'] = (data[vol_col] - features[f'vol_{tenor}_ma_20']) / data[vol_col].rolling(20).std()
 
         # Term structure features
         if 'atm_vol_1M' in data.columns and 'atm_vol_1Y' in data.columns:
@@ -93,7 +91,7 @@ class LightGBMModel:
         return features
 
     def train_pricing_model(self, X_train: pd.DataFrame, y_train: pd.Series,
-                            X_val: pd.DataFrame, y_val: pd.Series) -> None:
+                           X_val: pd.DataFrame, y_val: pd.Series) -> None:
         """
         Train model for option pricing
         """

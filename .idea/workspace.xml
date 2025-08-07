@@ -5,15 +5,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="47662d6b-a19f-409d-b0cf-7071c48186d1" name="Changes" comment="-">
-      <change afterPath="$PROJECT_DIR$/data/FRED/DGS2.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/FRED/DGS5.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/curves.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/models/garch_models.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/hedging.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/config/settings.py" beforeDir="false" afterPath="$PROJECT_DIR$/config/settings.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/strategies/volatility_arbitrage.py" beforeDir="false" afterPath="$PROJECT_DIR$/strategies/volatility_arbitrage.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/models/gk_model.py" beforeDir="false" afterPath="$PROJECT_DIR$/models/gk_model.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/models/gvv_model.py" beforeDir="false" afterPath="$PROJECT_DIR$/models/gvv_model.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/curves.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/curves.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/features.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/features.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -199,7 +196,15 @@
       <option name="project" value="LOCAL" />
       <updated>1754577602535</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="-">
+      <option name="closed" value="true" />
+      <created>1754579227020</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1754579227020</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">

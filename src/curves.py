@@ -12,7 +12,9 @@ from typing import Dict, Tuple, Optional, List
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
+
 warnings.filterwarnings('ignore')
+
 
 class DiscountCurveBuilder:
     """
@@ -90,6 +92,7 @@ class DiscountCurveBuilder:
         """
         Load FRED Treasury Bill data (all on discount basis)
         """
+
         def load_fred_file(filename: Path, label: str) -> pd.DataFrame:
             """
             Load single FRED file
@@ -111,10 +114,10 @@ class DiscountCurveBuilder:
         # Load only DTB files (all Treasury Bills on discount basis)
         # This ensures consistency - all rates use the same convention
         files = {
-            "DTB4WK.csv": "1M",   # 4-week T-bill
-            "DTB3.csv": "3M",     # 3-month T-bill
-            "DTB6.csv": "6M",     # 6-month T-bill
-            "DTB1YR.csv": "1Y"    # 1-year T-bill
+            "DTB4WK.csv": "1M",  # 4-week T-bill
+            "DTB3.csv": "3M",  # 3-month T-bill
+            "DTB6.csv": "6M",  # 6-month T-bill
+            "DTB1YR.csv": "1Y"  # 1-year T-bill
         }
 
         dfs = []
@@ -144,7 +147,7 @@ class DiscountCurveBuilder:
         return df_rates
 
     def nelson_siegel(self, t: np.ndarray, beta0: float, beta1: float,
-                     beta2: float, tau: float) -> np.ndarray:
+                      beta2: float, tau: float) -> np.ndarray:
         """
         Nelson-Siegel model for yield curve
         """
@@ -163,7 +166,7 @@ class DiscountCurveBuilder:
         return beta0 * factor1 + beta1 * factor2 + beta2 * factor3
 
     def nelson_siegel_svensson(self, t: np.ndarray, beta0: float, beta1: float,
-                              beta2: float, beta3: float, tau1: float, tau2: float) -> np.ndarray:
+                               beta2: float, beta3: float, tau1: float, tau2: float) -> np.ndarray:
         """
         Nelson-Siegel-Svensson model (extended with additional hump)
         """
@@ -189,6 +192,7 @@ class DiscountCurveBuilder:
         """
         Fit NSS model using global optimization
         """
+
         def objective(params):
             beta0, beta1, beta2, beta3, tau1, tau2 = params
             fitted = self.nelson_siegel_svensson(tenors, beta0, beta1, beta2, beta3, tau1, tau2)
@@ -196,12 +200,12 @@ class DiscountCurveBuilder:
 
         # Bounds for parameters (adjusted for T-bill rates)
         bounds = [
-            (0, 0.15),      # beta0 (level) - max 15%
+            (0, 0.15),  # beta0 (level) - max 15%
             (-0.15, 0.15),  # beta1 (slope)
             (-0.15, 0.15),  # beta2 (curvature)
             (-0.15, 0.15),  # beta3 (second curvature)
-            (0.1, 5),       # tau1
-            (0.1, 5)        # tau2
+            (0.1, 5),  # tau1
+            (0.1, 5)  # tau2
         ]
 
         # Use differential evolution for global optimization
@@ -222,7 +226,7 @@ class DiscountCurveBuilder:
             return None
 
     def build_curve(self, date: pd.Timestamp, market_rates: pd.Series,
-                   target_tenors: Dict[str, float]) -> pd.DataFrame:
+                    target_tenors: Dict[str, float]) -> pd.DataFrame:
         """
         Build discount curve for a given date
         """
@@ -241,7 +245,7 @@ class DiscountCurveBuilder:
         for label, discount_rate in available.items():
             # Get tenor in years
             if label == '1M':
-                tenor_years = 1/12
+                tenor_years = 1 / 12
                 days = 30
             elif label == '3M':
                 tenor_years = 0.25
@@ -318,7 +322,7 @@ class DiscountCurveBuilder:
             else:  # linear
                 from scipy.interpolate import interp1d
                 interpolator = interp1d(market_tenors, discount_factors,
-                                      kind='linear', fill_value='extrapolate')
+                                        kind='linear', fill_value='extrapolate')
 
             # Interpolate for target tenors
             for tenor_label, tenor_years in target_tenors.items():
@@ -352,7 +356,7 @@ class DiscountCurveBuilder:
         return pd.DataFrame(records)
 
     def build_curves_for_period(self, df_rates: pd.DataFrame,
-                               target_tenors: Dict[str, float]) -> pd.DataFrame:
+                                target_tenors: Dict[str, float]) -> pd.DataFrame:
         """
         Build curves for entire period with consistency checks
         """
@@ -444,8 +448,8 @@ class DiscountCurveBuilder:
             specs=[[{'type': 'surface', 'colspan': 2}, None],
                    [{'type': 'scatter'}, {'type': 'scatter'}]],
             subplot_titles=('T-Bill Yield Surface Over Time',
-                          'Current Yield Curve',
-                          'Historical 3M Rate'),
+                            'Current Yield Curve',
+                            'Historical 3M Rate'),
             vertical_spacing=0.1,
             row_heights=[0.6, 0.4]
         )
@@ -521,9 +525,10 @@ class DiscountCurveBuilder:
 
         return fig
 
+
 def process_discount_curves(data_dir: Path = Path("../data/FRED"),
-                          output_dir: Path = Path("data"),
-                          plot_dir: Path = Path("plots")):
+                            output_dir: Path = Path("data"),
+                            plot_dir: Path = Path("plots")):
     """
     Main function to process discount curves using consistent T-Bill data
     """
@@ -540,15 +545,15 @@ def process_discount_curves(data_dir: Path = Path("../data/FRED"),
 
     # Define target tenors for FX options (up to 1Y only)
     target_tenors = {
-        '1W': 1/52,
-        '2W': 2/52,
-        '3W': 3/52,
-        '1M': 1/12,
-        '2M': 2/12,
-        '3M': 3/12,
-        '4M': 4/12,
-        '6M': 6/12,
-        '9M': 9/12,
+        '1W': 1 / 52,
+        '2W': 2 / 52,
+        '3W': 3 / 52,
+        '1M': 1 / 12,
+        '2M': 2 / 12,
+        '3M': 3 / 12,
+        '4M': 4 / 12,
+        '6M': 6 / 12,
+        '9M': 9 / 12,
         '1Y': 1.0
     }
 
@@ -581,6 +586,7 @@ def process_discount_curves(data_dir: Path = Path("../data/FRED"),
     print(f"  Data consistency: All rates from Treasury Bills (discount basis)")
 
     return df_curves
+
 
 if __name__ == "__main__":
     # Run as standalone script
