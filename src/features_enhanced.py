@@ -10,8 +10,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Import from existing modules
-from features import HMMRegimeDetector, FeatureEngineer
-from models.garch_models import GARCHForecaster, VolatilityComparator, create_time_features
+from src.features import HMMRegimeDetector, FeatureEngineer
+from src.models.garch_models import GARCHForecaster, VolatilityComparator, create_time_features
 
 
 class EnhancedFeatureEngineer(FeatureEngineer):

@@ -49,8 +49,10 @@ class HMMRegimeDetector:
                 model = hmm.GaussianHMM(
                     n_components=self.n_states,
                     covariance_type="full",
-                    n_iter=100,
-                    random_state=42
+                    n_iter=200,
+                    random_state=42,
+                    # tol=1e-2,
+                    init_params=''  # disables automatic initialization,
                 )
             else:
                 model = self.models[pair]

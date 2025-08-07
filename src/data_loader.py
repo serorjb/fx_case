@@ -22,6 +22,10 @@ class FXDataLoader:
         print("Loading FX data...")
         self.fx_data = pd.read_parquet(self.fx_path)
 
+        # FIXME: DELETE THIS LINE ONCE DONE
+        self.fx_data = self.fx_data.tail(1500)
+        # FIXME: DELETE THIS LINE ONCE DONE
+
         print("Loading discount curves...")
         self.discount_data = pd.read_parquet(self.discount_path)
 

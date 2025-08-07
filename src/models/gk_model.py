@@ -5,7 +5,7 @@ import numpy as np
 from scipy.stats import norm
 from scipy.optimize import minimize_scalar
 from typing import Dict, Tuple, Optional
-from .base_model import BaseOptionModel
+from src.models.base_model import BaseOptionModel
 
 class GarmanKohlhagen(BaseOptionModel):
     """
