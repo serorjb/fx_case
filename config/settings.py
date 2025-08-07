@@ -133,14 +133,14 @@ VALIDATION_RATIO = 0.2        # 20% for validation
 TEST_RATIO = 0.2             # 20% for testing
 
 # Rebalancing
-REBALANCE_FREQUENCY = 'W'     # Weekly rebalancing ('D', 'W', 'M')
+REBALANCE_FREQUENCY = 'B'     # Weekly rebalancing ('D', 'W', 'M')
 SIGNAL_LAG = 1               # Lag between signal and execution (days)
 
 # =======================
 # STRATEGY PARAMETERS
 # =======================
 # Volatility Arbitrage
-VOL_ARB_LOOKBACK = 20        # Days for realized vol calculation
+VOL_ARB_LOOKBACK = 21        # Days for realized vol calculation
 VOL_ARB_ZSCORE_THRESHOLD = 2.0  # Z-score threshold for signals
 VOL_ARB_MIN_EDGE = 0.005     # Minimum vol edge (50 bps)
 
@@ -152,7 +152,7 @@ CARRY_LOOKBACK = 60          # Days for carry calculation
 USE_KELLY_SIZING = True       # Use Kelly criterion
 KELLY_FRACTION = 0.25        # Max Kelly fraction
 MIN_POSITION_SIZE = 10000    # Minimum position size
-MAX_POSITIONS = 20           # Maximum concurrent positions
+MAX_POSITIONS = 100           # Maximum concurrent positions
 
 # =======================
 # LIGHTGBM PARAMETERS

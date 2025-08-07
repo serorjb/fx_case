@@ -35,7 +35,7 @@ class BacktestingEngine:
 
     def run_backtest(self, strategies: List, data: Dict[str, pd.DataFrame],
                      start_date: pd.Timestamp, end_date: pd.Timestamp,
-                     rebalance_freq: str = 'W') -> Dict:
+                     rebalance_freq: str = 'D') -> Dict:
         """
         Run backtest for multiple strategies
         Fixed version with proper data alignment
@@ -79,6 +79,7 @@ class BacktestingEngine:
                     signals = strategy.generate_signals(data, date)
                     all_signals.extend(signals)
                 except Exception as e:
+                    print(f"  ⚠️ Strategy {strategy.name} failed on {date.date()}: {e}")
                     # Continue if strategy fails for this date
                     pass
 
