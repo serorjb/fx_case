@@ -5,26 +5,15 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="47662d6b-a19f-409d-b0cf-7071c48186d1" name="Changes" comment="-">
-      <change afterPath="$PROJECT_DIR$/backtesting/engine.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/config/settings.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/models/gk_model.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/models/gvv_model.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/models/ml_models.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/models/sabr_model.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/run_analysis.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/data_loader.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/features.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/greeks.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/risk_management.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/visualization/garch_plots.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/visualization/plots.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/strategies/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/strategies/base_strategy.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/strategies/carry_strategy.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/strategies/volatility_arbitrage.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/data/FRED/DGS2.csv" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/data/FRED/DGS5.csv" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/curves.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/models/garch_models.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/draft.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/config/settings.py" beforeDir="false" afterPath="$PROJECT_DIR$/config/settings.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/strategies/volatility_arbitrage.py" beforeDir="false" afterPath="$PROJECT_DIR$/strategies/volatility_arbitrage.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -55,6 +44,7 @@
   "keyToString": {
     "Python.cme_ois (1).executor": "Run",
     "Python.cme_ois.executor": "Run",
+    "Python.curves.executor": "Run",
     "Python.draft.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "last_opened_file_path": "C:/Dev/fx_case/data/FRED"
@@ -70,7 +60,29 @@
       <recent name="C:\Dev\fx_case\data" />
     </key>
   </component>
-  <component name="RunManager" selected="Python.draft">
+  <component name="RunManager" selected="Python.curves">
+    <configuration name="curves" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="fx_case" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/src" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/src/curves.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
     <configuration name="discount_curves" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="fx_case" />
       <option name="ENV_FILES" value="" />
@@ -139,6 +151,7 @@
     </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Python.curves" />
         <item itemvalue="Python.draft" />
         <item itemvalue="Python.discount_curves" />
         <item itemvalue="Python.discount_curves" />
@@ -178,7 +191,15 @@
       <option name="project" value="LOCAL" />
       <updated>1754573802762</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="-">
+      <option name="closed" value="true" />
+      <created>1754577602535</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1754577602535</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
