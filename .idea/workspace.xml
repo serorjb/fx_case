@@ -5,9 +5,26 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="47662d6b-a19f-409d-b0cf-7071c48186d1" name="Changes" comment="-">
+      <change afterPath="$PROJECT_DIR$/backtesting/engine.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/config/settings.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/models/gk_model.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/models/gvv_model.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/models/ml_models.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/models/sabr_model.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/run_analysis.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/data_loader.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/features.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/greeks.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/risk_management.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/visualization/garch_plots.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/visualization/plots.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/strategies/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/strategies/base_strategy.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/strategies/carry_strategy.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/strategies/volatility_arbitrage.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/discount_curves.py" beforeDir="false" afterPath="$PROJECT_DIR$/discount_curves.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/draft.py" beforeDir="false" afterPath="$PROJECT_DIR$/draft.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/draft.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -153,7 +170,15 @@
       <option name="project" value="LOCAL" />
       <updated>1754571901937</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="-">
+      <option name="closed" value="true" />
+      <created>1754573802762</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1754573802762</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
@@ -173,11 +198,6 @@
           <url>file://$PROJECT_DIR$/discount_curves.py</url>
           <line>102</line>
           <option name="timeStamp" value="7" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
-          <url>file://$PROJECT_DIR$/draft.py</url>
-          <line>3</line>
-          <option name="timeStamp" value="8" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>
