@@ -11,7 +11,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.strategies.base_strategy import BaseStrategy, Signal, Position
 from src.models.gk_model import GarmanKohlhagen
 from src.models.gvv_model import GVVModel
-from hedging import DeltaHedger
+from src.hedging import DeltaHedger
 
 class VolatilityArbitrageStrategy(BaseStrategy):
     """

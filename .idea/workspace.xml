@@ -6,8 +6,6 @@
   <component name="ChangeListManager">
     <list default="true" id="47662d6b-a19f-409d-b0cf-7071c48186d1" name="Changes" comment="-">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/config/settings.py" beforeDir="false" afterPath="$PROJECT_DIR$/config/settings.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/backtesting/engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/backtesting/engine.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -24,6 +22,18 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "serorjb"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/serorjb/fx_case.git",
+    "accountId": "b4a1e35b-af2d-4e0c-b530-8ee259e62211"
+  }
+}]]></component>
   <component name="ProjectColorInfo">{
   &quot;customColor&quot;: &quot;&quot;,
   &quot;associatedIndex&quot;: 1
@@ -39,6 +49,7 @@
     "Python.cme_ois (1).executor": "Run",
     "Python.cme_ois.executor": "Run",
     "Python.curves.executor": "Run",
+    "Python.data_loader.executor": "Run",
     "Python.draft.executor": "Run",
     "Python.features.executor": "Run",
     "Python.features_enhanced.executor": "Run",
@@ -61,7 +72,7 @@
     </key>
   </component>
   <component name="RunManager" selected="Python.main">
-    <configuration name="curves" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+    <configuration name="data_loader" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="fx_case" />
       <option name="ENV_FILES" value="" />
       <option name="INTERPRETER_OPTIONS" value="" />
@@ -74,7 +85,7 @@
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
-      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/src/curves.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/src/data_loader.py" />
       <option name="PARAMETERS" value="" />
       <option name="SHOW_COMMAND_LINE" value="false" />
       <option name="EMULATE_TERMINAL" value="false" />
@@ -196,10 +207,10 @@
     <recent_temporary>
       <list>
         <item itemvalue="Python.main" />
+        <item itemvalue="Python.data_loader" />
         <item itemvalue="Python.features" />
         <item itemvalue="Python.plots" />
         <item itemvalue="Python.features_enhanced" />
-        <item itemvalue="Python.curves" />
       </list>
     </recent_temporary>
   </component>
@@ -300,7 +311,15 @@
       <option name="project" value="LOCAL" />
       <updated>1754585870441</updated>
     </task>
-    <option name="localTasksCounter" value="12" />
+    <task id="LOCAL-00012" summary="-">
+      <option name="closed" value="true" />
+      <created>1754586092856</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1754586092856</updated>
+    </task>
+    <option name="localTasksCounter" value="13" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">

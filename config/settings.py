@@ -93,7 +93,7 @@ MIN_EDGE_THRESHOLD = 0.001     # Minimum edge to trade (10 bps)
 
 # Discount curve building
 CURVE_METHOD = 'nelson_siegel_svensson'  # 'pchip', 'cubic', 'linear', 'nelson_siegel', 'nelson_siegel_svensson'
-CURVE_REFIT_FREQ = 20          # Refit curve every N days
+CURVE_REFIT_FREQ = 21          # Refit curve every N days
 
 # =======================
 # GARCH PARAMETERS
@@ -102,7 +102,7 @@ CURVE_REFIT_FREQ = 20          # Refit curve every N days
 GARCH_TYPE = 'GARCH'           # 'GARCH', 'EGARCH', 'GJR-GARCH', 'HARCH'
 GARCH_P = 1                    # GARCH lag order
 GARCH_Q = 1                    # ARCH lag order
-GARCH_REFIT_WINDOW = 252       # Refit GARCH every N observations
+GARCH_REFIT_WINDOW = 21       # Refit GARCH every N observations
 GARCH_MIN_OBS = 100           # Minimum observations for GARCH
 
 # Multivariate GARCH
@@ -146,7 +146,7 @@ VOL_ARB_MIN_EDGE = 0.005     # Minimum vol edge (50 bps)
 
 # Carry Strategy
 CARRY_MIN_RATIO = 0.5        # Minimum carry/vol ratio
-CARRY_LOOKBACK = 60          # Days for carry calculation
+CARRY_LOOKBACK = 63          # Days for carry calculation
 
 # Position sizing
 USE_KELLY_SIZING = True       # Use Kelly criterion
@@ -213,7 +213,7 @@ COLORS = {
 # PERFORMANCE TARGETS
 # =======================
 TARGET_SHARPE = 1.5          # Target Sharpe ratio
-TARGET_RETURN = 0.15         # Target annual return (15%)
+TARGET_RETURN = 0.10         # Target annual return (10%)
 TARGET_WIN_RATE = 0.55       # Target win rate (55%)
 
 # =======================
