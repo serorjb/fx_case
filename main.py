@@ -1,683 +1,1147 @@
-# main.py
 """
-Main execution script for FX Options Trading System
-Enhanced version with multi-model approach including GVV, SABR, ML models, and Delta Hedging
+FX Options Trading System - Complete Implementation
+Prices options using Black-Scholes, finds mispricings using various models,
+trades and delta hedges positions.
 """
-import sys
-import os
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-import pandas as pd
 import numpy as np
+import pandas as pd
 from pathlib import Path
-import warnings
-import joblib
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
-from src.visualization.vol_surface_3d import create_enhanced_vol_surfaces
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass, field
+import warnings
 
 warnings.filterwarnings('ignore')
 
-# Import configurations
-from config.settings import *
 
-# Import data and curves modules
-from src.data_loader import FXDataLoader
-from src.curves import DiscountCurveBuilder, process_discount_curves
+# ==================== Configuration ====================
+class Config:
+    """System configuration"""
+    # Paths
+    DATA_DIR = Path("data")
+    RESULTS_DIR = Path("results")
+    FX_DATA_PATH = DATA_DIR / "FX.parquet"
+    CURVES_PATH = DATA_DIR / "discount_curves.parquet"
 
-# Import feature engineering modules
-from src.features_enhanced import EnhancedFeatureEngineer
+    # Trading parameters
+    INITIAL_CAPITAL = 10_000_000
+    MAX_LEVERAGE = 5
+    MAX_POSITIONS = 500
+    MAX_DELTA_EXPOSURE = 0.03  # 3% max delta at end of day
+    MISPRICING_THRESHOLD = 0.02  # 2% mispricing to trade
 
-# Import models
-from src.models.gk_model import GarmanKohlhagen
-from src.models.gvv_model import GVVModel
-from src.models.sabr_model import SABRModel
-from src.models.ml_models import LightGBMModel
+    # Transaction costs
+    SPOT_SPREAD = 0.0002  # 2 bps
+    OPTION_SPREAD = 0.0005  # 5 bps
 
-# Import strategies
-from src.strategies.multi_model_strategies import (
-    create_all_model_strategies,
-    MLSignalStrategy,
-    GVVArbitrageStrategy,
-    SABRVolatilityStrategy,
-    ModelConsensusStrategy
-)
-from src.strategies.volatility_arbitrage import VolatilityArbitrageStrategy
-from src.strategies.carry_strategy import CarryToVolStrategy
+    # Model parameters
+    LGBM_TRAINING_YEARS = 5
+    IV_MA_DAYS = 20  # For IV filter strategy
+    DELTA_MODEL = 'BS'  # Model for delta calculation: 'BS', 'GK', 'GVV', 'SABR'
 
-# Import backtesting and risk management
-from src.backtesting.engine import BacktestingEngine
-from src.backtesting.performance import PerformanceAnalyzer
-from src.risk_management import RiskManager
-from src.hedging import DeltaHedger
+    # Deltas to evaluate (as absolute values)
+    DELTAS = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
 
-# Import visualization
-from src.visualization.plots import TradingVisualizer
-from src.visualization.multi_model_plots import MultiModelVisualizer
-from src.visualization.garch_plots import GARCHVisualizer
+    # Tenors to trade
+    TENORS = ['1W', '2W', '3W', '1M', '2M', '3M', '4M', '6M', '9M', '1Y']
+
+    # Currency pairs
+    PAIRS = ['USDJPY', 'GBPNZD', 'USDCAD']
 
 
-class FXOptionsSystem:
-    """
-    Main system class for FX Options trading
-    """
+# ==================== Data Structures ====================
+@dataclass
+class OptionPosition:
+    """Represents an option position in the book"""
+    entry_date: pd.Timestamp
+    expiry_date: pd.Timestamp
+    pair: str
+    strike: float
+    option_type: str  # 'call' or 'put'
+    position_size: float  # positive for long, negative for short
+    entry_price: float
+    entry_spot: float
+    entry_vol: float
+    model_used: str
+    current_delta: float = 0.0
+    current_vega: float = 0.0
+    current_value: float = 0.0
+    pnl: float = 0.0
+
+
+@dataclass
+class TradingBook:
+    """Manages all positions and hedges"""
+    options: List[OptionPosition] = field(default_factory=list)
+    spot_hedge: float = 0.0  # Spot position for delta hedging
+    cash: float = Config.INITIAL_CAPITAL
+    used_margin: float = 0.0
+
+    def get_net_delta(self) -> float:
+        """Calculate total portfolio delta"""
+        option_delta = sum(pos.current_delta * pos.position_size for pos in self.options)
+        return option_delta + self.spot_hedge
+
+    def get_net_vega(self) -> float:
+        """Calculate total portfolio vega"""
+        return sum(pos.current_vega * pos.position_size for pos in self.options)
+
+    def get_num_positions(self) -> int:
+        """Count active positions"""
+        return len(self.options)
+
+
+@dataclass
+class MarketData:
+    """Market data for a specific date"""
+    date: pd.Timestamp
+    spot: Dict[str, float]  # spot prices by pair
+    forwards: Dict[str, Dict[str, float]]  # forward points by pair and tenor
+    atm_vols: Dict[str, Dict[str, float]]  # ATM vols by pair and tenor
+    rr_25: Dict[str, Dict[str, float]]  # 25-delta risk reversals
+    bf_25: Dict[str, Dict[str, float]]  # 25-delta butterflies
+    rr_10: Dict[str, Dict[str, float]]  # 10-delta risk reversals
+    bf_10: Dict[str, Dict[str, float]]  # 10-delta butterflies
+    rates: Dict[str, float]  # interest rates by currency
+
+
+# ==================== Pricing Models ====================
+class BlackScholes:
+    """Black-Scholes pricing for FX options"""
+
+    @staticmethod
+    def price(S: float, K: float, T: float, r_d: float, r_f: float,
+              sigma: float, option_type: str) -> float:
+        """Price option using Black-Scholes"""
+        if T <= 0:
+            return max(0, S - K) if option_type == 'call' else max(0, K - S)
+
+        from scipy.stats import norm
+
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+
+        if option_type == 'call':
+            return S * np.exp(-r_f * T) * norm.cdf(d1) - K * np.exp(-r_d * T) * norm.cdf(d2)
+        else:
+            return K * np.exp(-r_d * T) * norm.cdf(-d2) - S * np.exp(-r_f * T) * norm.cdf(-d1)
+
+    @staticmethod
+    def delta(S: float, K: float, T: float, r_d: float, r_f: float,
+              sigma: float, option_type: str) -> float:
+        """Calculate option delta"""
+        if T <= 0:
+            return 1.0 if option_type == 'call' and S > K else 0.0
+
+        from scipy.stats import norm
+
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+
+        if option_type == 'call':
+            return np.exp(-r_f * T) * norm.cdf(d1)
+        else:
+            return -np.exp(-r_f * T) * norm.cdf(-d1)
+
+    @staticmethod
+    def vega(S: float, K: float, T: float, r_d: float, r_f: float, sigma: float) -> float:
+        """Calculate option vega"""
+        if T <= 0:
+            return 0.0
+
+        from scipy.stats import norm
+
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        return S * np.exp(-r_f * T) * norm.pdf(d1) * np.sqrt(T) / 100  # Per 1% vol change
+
+    @staticmethod
+    def implied_vol_from_delta(delta: float, T: float, r_f: float,
+                               option_type: str, spot_vol: float) -> float:
+        """Get implied vol for a given delta strike"""
+        # Simplified - in practice would use proper inversion
+        if option_type == 'call':
+            if delta > 0.5:  # ITM call
+                return spot_vol * (1 - 0.1 * (delta - 0.5))
+            else:  # OTM call
+                return spot_vol * (1 + 0.1 * (0.5 - delta))
+        else:  # put
+            if delta < -0.5:  # ITM put
+                return spot_vol * (1 - 0.1 * (abs(delta) - 0.5))
+            else:  # OTM put
+                return spot_vol * (1 + 0.1 * (0.5 - abs(delta)))
+
+    @staticmethod
+    def strike_from_delta(S: float, delta: float, T: float, r_d: float, r_f: float,
+                          sigma: float, option_type: str) -> float:
+        """Calculate strike from delta"""
+        from scipy.stats import norm
+
+        if option_type == 'call':
+            d1 = norm.ppf(delta * np.exp(r_f * T))
+        else:
+            d1 = -norm.ppf(-delta * np.exp(r_f * T))
+
+        K = S * np.exp(-(d1 * sigma * np.sqrt(T) - (r_d - r_f + 0.5 * sigma ** 2) * T))
+        return K
+
+
+class GVVModel:
+    """Simplified GVV model implementation"""
+
+    @staticmethod
+    def price(S: float, K: float, T: float, r_d: float, r_f: float,
+              atm_vol: float, rr_25: float, bf_25: float, option_type: str) -> float:
+        """Price using GVV adjustment to Black-Scholes"""
+        # Calculate smile-adjusted volatility
+        moneyness = K / S
+
+        if moneyness < 0.95:  # Deep OTM put / ITM call region
+            smile_vol = atm_vol + bf_25 - rr_25 / 2 + 0.002 * (0.95 - moneyness)
+        elif moneyness > 1.05:  # Deep OTM call / ITM put region
+            smile_vol = atm_vol + bf_25 + rr_25 / 2 + 0.002 * (moneyness - 1.05)
+        else:  # Near ATM
+            skew_adjustment = rr_25 * (moneyness - 1.0) * 4  # Linear skew
+            smile_vol = atm_vol + bf_25 + skew_adjustment
+
+        # Price with adjusted vol
+        return BlackScholes.price(S, K, T, r_d, r_f, smile_vol, option_type)
+
+
+class SABRModel:
+    """Simplified SABR model"""
 
     def __init__(self):
-        """Initialize the FX Options Trading System"""
-        self.loader = None
-        self.data = None
-        self.features = None
-        self.models = None
-        self.ml_models = None
-        self.strategies = None
-        self.results = None
+        self.alpha = None
+        self.beta = 0.5  # Fixed for FX
+        self.rho = -0.3
+        self.nu = 0.3
 
-    def initialize_system(self) -> bool:
-        """Initialize all system components"""
-        print("=" * 80)
-        print(" FX OPTIONS TRADING SYSTEM - MULTI-MODEL ENHANCED VERSION ".center(80))
-        print("=" * 80)
-        print(f"\n📅 Start time: {datetime.now()}")
-        print(f"⚙️  Configuration:")
-        print(f"   - Curve Method: {CURVE_METHOD}")
-        print(f"   - HMM States: {HMM_STATES}")
-        print(f"   - Delta Hedging: {'Enabled' if ENABLE_DELTA_HEDGING else 'Disabled'}")
-        print(f"   - Initial Capital: ${INITIAL_CAPITAL:,.0f}")
-        print(f"   - Max Drawdown Limit: {MAX_DRAWDOWN:.1%}")
-        print("-" * 80)
+    def calibrate(self, strikes: np.ndarray, vols: np.ndarray, F: float, T: float):
+        """Simple calibration - just set alpha to ATM vol"""
+        atm_idx = np.argmin(np.abs(strikes - F))
+        self.alpha = vols[atm_idx]
 
-        # Create necessary directories
-        for directory in [PLOTS_DIR, RESULTS_DIR, DATA_DIR]:
-            directory.mkdir(exist_ok=True, parents=True)
+    def price(self, S: float, K: float, T: float, r_d: float, r_f: float,
+              atm_vol: float, option_type: str) -> float:
+        """Price using SABR vol"""
+        if self.alpha is None:
+            self.alpha = atm_vol
 
-        # Check for data files
-        if not FX_DATA_PATH.exists():
-            raise FileNotFoundError(f"❌ FX data not found at {FX_DATA_PATH}")
+        # Simplified SABR vol (Hagan approximation)
+        F = S * np.exp((r_d - r_f) * T)
+        if abs(F - K) < 0.001:
+            sabr_vol = self.alpha
+        else:
+            z = (self.nu / self.alpha) * (F * K) ** ((1 - self.beta) / 2) * np.log(F / K)
+            x = np.log((np.sqrt(1 - 2 * self.rho * z + z ** 2) + z - self.rho) / (1 - self.rho))
+            sabr_vol = self.alpha * (z / x if abs(x) > 0.001 else 1.0)
 
-        # Process discount curves if needed
-        if not DISCOUNT_CURVES_PATH.exists():
-            print("\n📊 Processing discount curves...")
-            try:
-                process_discount_curves(
-                    data_dir=DATA_DIR / "FRED",
-                    output_dir=DATA_DIR,
-                    plot_dir=PLOTS_DIR
-                )
-                print("   ✓ Discount curves processed successfully")
-            except Exception as e:
-                print(f"   ❌ Error processing discount curves: {e}")
-                return False
+        return BlackScholes.price(S, K, T, r_d, r_f, sabr_vol, option_type)
 
-        return True
 
-    def load_and_prepare_data(self) -> Tuple[FXDataLoader, Dict]:
-        """Load FX data and discount curves"""
-        print("\n" + "=" * 80)
-        print("1️⃣  LOADING AND PREPARING DATA")
-        print("-" * 80)
+# ==================== ML Model ====================
+class LGBMPricer:
+    """LightGBM model for option pricing"""
 
-        # Initialize data loader
-        self.loader = FXDataLoader(FX_DATA_PATH, DISCOUNT_CURVES_PATH)
-        self.loader.load_data()
+    def __init__(self, training_years: int = 5):
+        self.training_years = training_years
+        self.model = None
+        self.last_train_date = None
 
-        # Process all currency pairs
-        self.data = self.loader.process_all_pairs()
+    def prepare_features(self, market_data: MarketData, pair: str,
+                         strike: float, tenor: str, option_type: str,
+                         historical_data: pd.DataFrame = None) -> np.ndarray:
+        """Prepare features for ML model"""
+        spot = market_data.spot[pair]
+        T = self._tenor_to_years(tenor)
 
-        # Data quality check
-        print("\n📊 Data Summary:")
-        valid_pairs = []
-        for pair in CURRENCY_PAIRS:
-            if pair not in self.data:
-                print(f"   ⚠️  {pair}: Not found in data")
-                continue
+        # Basic features
+        features = [
+            T,  # Time to maturity
+            strike / spot,  # Moneyness
+            market_data.rates.get('USD', 0.05),  # Domestic rate
+            market_data.rates.get('JPY', 0.01),  # Foreign rate
+            market_data.atm_vols[pair].get(tenor, 0.1),  # ATM vol
+            market_data.rr_25[pair].get(tenor, 0),  # Risk reversal
+            market_data.bf_25[pair].get(tenor, 0),  # Butterfly
+        ]
 
-            pair_data = self.data[pair]
-            print(f"   ✓ {pair}: {pair_data.shape[0]:,} days, {pair_data.shape[1]:,} features")
+        # Add historical vol if available
+        if historical_data is not None and len(historical_data) > 20:
+            returns = np.log(historical_data['spot'] / historical_data['spot'].shift(1))
+            realized_vol = returns.tail(20).std() * np.sqrt(252)
+            features.append(realized_vol)
+        else:
+            features.append(0.1)  # Default RV
 
-            # Check for critical columns
-            required_cols = ['spot', 'atm_vol_1M', 'rr_25_1M', 'bf_25_1M']
-            missing = [col for col in required_cols if col not in pair_data.columns]
-            if missing:
-                print(f"      ⚠️  Missing columns: {missing}")
-            else:
-                valid_pairs.append(pair)
+        # Add other model prices as features (would be calculated separately)
+        features.extend([0.0, 0.0, 0.0])  # Placeholder for GK, GVV, SABR prices
 
-        print(f"\n✅ Successfully loaded {len(valid_pairs)} currency pairs")
-        return self.loader, self.data
+        return np.array(features).reshape(1, -1)
 
-    def create_enhanced_features(self) -> Tuple[Dict, Dict]:
-        """Create all enhanced features including GARCH and HMM"""
-        print("\n" + "=" * 80)
-        print("2️⃣  CREATING ENHANCED FEATURES")
-        print("-" * 80)
+    def train(self, training_data: pd.DataFrame):
+        """Train the model on historical data"""
+        # Simplified - would implement full training logic
+        import lightgbm as lgb
 
-        # Initialize pricing models for feature generation
-        self.models = {
-            'gk': GarmanKohlhagen(),
-            'gvv': GVVModel(),
-            'sabr': SABRModel()
+        # Prepare training data
+        X = training_data[['moneyness', 'time_to_maturity', 'atm_vol', 'rr', 'bf']].values
+        y = training_data['option_price'].values
+
+        # Train model
+        self.model = lgb.LGBMRegressor(n_estimators=100, learning_rate=0.05)
+        self.model.fit(X, y)
+
+    def price(self, S: float, K: float, T: float, r_d: float, r_f: float,
+              features: np.ndarray) -> float:
+        """Price option using trained model"""
+        if self.model is None:
+            # Fallback to Black-Scholes if not trained
+            return BlackScholes.price(S, K, T, r_d, r_f, 0.1, 'call')
+
+        return self.model.predict(features)[0]
+
+    def _tenor_to_years(self, tenor: str) -> float:
+        """Convert tenor to years"""
+        mapping = {
+            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
+            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
+            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
+            '1Y': 1.0
         }
+        return mapping.get(tenor, 1 / 12)
 
-        # Initialize enhanced feature engineer
-        enhanced_fe = EnhancedFeatureEngineer()
 
-        # Create features for all pairs
-        print("\n📈 Generating features...")
-        self.features = enhanced_fe.create_all_enhanced_features(self.data, self.models)
+# ==================== Strategy ====================
+class OptionsArbitrageStrategy:
+    """
+    Main trading strategy that:
+    1. Prices options using Black-Scholes at various strikes
+    2. Compares with model prices (GVV, SABR, etc.)
+    3. Trades mispricings
+    4. Delta hedges positions
+    """
 
-        # Print feature summary
-        print("\n📊 Feature Summary:")
-        for pair, features in self.features.items():
-            if features is None or features.empty:
-                print(f"   ⚠️  {pair}: No features created")
+    def __init__(self, model_name: str, use_iv_filter: bool = False,
+                 delta_model: str = None):
+        self.model_name = model_name
+        self.use_iv_filter = use_iv_filter
+        self.delta_model = delta_model or Config.DELTA_MODEL  # Use config default if not specified
+        self.book = TradingBook()
+        self.sabr_model = SABRModel()
+        self.lgbm_model = LGBMPricer()
+
+        # Initialize delta model if different from BS
+        self.delta_sabr_model = SABRModel() if self.delta_model == 'SABR' else None
+
+        # Track performance
+        self.equity_curve = []
+        self.trades_log = []
+        self.hedges_log = []
+        self.daily_stats = []
+
+    def _calculate_delta(self, spot: float, strike: float, T: float, r_d: float, r_f: float,
+                         vol: float, option_type: str, market_data: MarketData,
+                         pair: str, tenor: str) -> float:
+        """Calculate delta using the specified model"""
+
+        if self.delta_model == 'BS' or self.delta_model == 'GK':
+            # Black-Scholes / Garman-Kohlhagen delta
+            return BlackScholes.delta(spot, strike, T, r_d, r_f, vol, option_type)
+
+        elif self.delta_model == 'GVV':
+            # GVV delta calculation
+            rr_25 = market_data.rr_25[pair].get(tenor, 0)
+            bf_25 = market_data.bf_25[pair].get(tenor, 0)
+
+            # Calculate GVV-adjusted volatility for this strike
+            moneyness = strike / spot
+            if moneyness < 0.95:
+                smile_vol = vol + bf_25 - rr_25 / 2 + 0.002 * (0.95 - moneyness)
+            elif moneyness > 1.05:
+                smile_vol = vol + bf_25 + rr_25 / 2 + 0.002 * (moneyness - 1.05)
+            else:
+                skew_adjustment = rr_25 * (moneyness - 1.0) * 4
+                smile_vol = vol + bf_25 + skew_adjustment
+
+            # Use adjusted vol for delta
+            return BlackScholes.delta(spot, strike, T, r_d, r_f, smile_vol, option_type)
+
+        elif self.delta_model == 'SABR':
+            # SABR delta calculation
+            if self.delta_sabr_model.alpha is None:
+                # Calibrate SABR if not done
+                strikes = np.array([spot * 0.9, spot, spot * 1.1])
+                vols = np.array([vol * 1.1, vol, vol * 1.1])
+                self.delta_sabr_model.calibrate(strikes, vols, spot, T)
+
+            # Calculate SABR vol for this strike
+            F = spot * np.exp((r_d - r_f) * T)
+            if abs(F - strike) < 0.001:
+                sabr_vol = self.delta_sabr_model.alpha
+            else:
+                z = (self.delta_sabr_model.nu / self.delta_sabr_model.alpha) * \
+                    (F * strike) ** ((1 - self.delta_sabr_model.beta) / 2) * np.log(F / strike)
+                x = np.log((np.sqrt(1 - 2 * self.delta_sabr_model.rho * z + z ** 2) + z -
+                            self.delta_sabr_model.rho) / (1 - self.delta_sabr_model.rho))
+                sabr_vol = self.delta_sabr_model.alpha * (z / x if abs(x) > 0.001 else 1.0)
+
+            # Use SABR vol for delta
+            return BlackScholes.delta(spot, strike, T, r_d, r_f, sabr_vol, option_type)
+
+        else:
+            # Default to Black-Scholes
+            return BlackScholes.delta(spot, strike, T, r_d, r_f, vol, option_type)
+
+    def run_daily(self, market_data: MarketData, historical_data: Dict[str, pd.DataFrame]):
+        """Execute daily trading logic"""
+
+        # 1. Update existing positions
+        self._update_positions(market_data)
+
+        # 2. Find new trading opportunities
+        signals = self._find_opportunities(market_data, historical_data)
+
+        # 3. Execute trades
+        self._execute_trades(signals, market_data)
+
+        # 4. Delta hedge
+        self._delta_hedge(market_data)
+
+        # 5. Calculate interest on cash/margin
+        self._calculate_interest(market_data)
+
+        # 6. Record daily statistics
+        self._record_stats(market_data)
+
+    def _find_opportunities(self, market_data: MarketData,
+                            historical_data: Dict[str, pd.DataFrame]) -> List[Dict]:
+        """Find mispriced options to trade"""
+        signals = []
+
+        for pair in Config.PAIRS:
+            if pair not in market_data.spot:
                 continue
 
-            print(f"   ✓ {pair}: {features.shape[1]:,} total features")
+            spot = market_data.spot[pair]
 
-            # Analyze feature groups
-            garch_features = [col for col in features.columns if 'garch' in col.lower()]
-            hmm_features = [col for col in features.columns if 'hmm' in col.lower() or 'regime' in col.lower()]
-            time_features = [col for col in features.columns if
-                             any(t in col.lower() for t in ['day', 'month', 'quarter', 'year'])]
-            model_features = [col for col in features.columns if any(m in col.lower() for m in ['gvv', 'sabr', 'gk'])]
+            # Get proper rates from curves for this pair
+            if pair == 'USDJPY':
+                r_d = market_data.rates.get('USD', 0.05)
+                r_f = market_data.rates.get('JPY', 0.01)
+            elif pair == 'GBPNZD':
+                r_d = market_data.rates.get('GBP', 0.04)
+                r_f = market_data.rates.get('NZD', 0.03)
+            elif pair == 'USDCAD':
+                r_d = market_data.rates.get('USD', 0.05)
+                r_f = market_data.rates.get('CAD', 0.04)
+            else:
+                r_d = 0.05
+                r_f = 0.01
 
-            print(f"      - GARCH features: {len(garch_features)}")
-            print(f"      - HMM features: {len(hmm_features)}")
-            print(f"      - Time features: {len(time_features)}")
-            print(f"      - Model features: {len(model_features)}")
-
-        return self.features, self.models
-
-    def split_data(self) -> Tuple[pd.DatetimeIndex, pd.DatetimeIndex, pd.DatetimeIndex]:
-        """Split data into train, validation, and test sets"""
-        print("\n" + "=" * 80)
-        print("3️⃣  SPLITTING DATA")
-        print("-" * 80)
-
-        # Use USDJPY as reference for dates
-        reference_pair = 'USDJPY'
-        if reference_pair not in self.data:
-            reference_pair = list(self.data.keys())[0]
-            print(f"   ⚠️  Using {reference_pair} as reference (USDJPY not available)")
-
-        all_dates = self.data[reference_pair].index
-        n_dates = len(all_dates)
-
-        # Calculate split points
-        train_end = int(n_dates * TRAIN_RATIO)
-        val_end = int(n_dates * (TRAIN_RATIO + VALIDATION_RATIO))
-
-        train_dates = all_dates[:train_end]
-        val_dates = all_dates[train_end:val_end]
-        test_dates = all_dates[val_end:]
-
-        print(f"\n📅 Data Split:")
-        print(f"   ✓ Train: {train_dates[0].date()} to {train_dates[-1].date()} ({len(train_dates):,} days)")
-        print(f"   ✓ Val:   {val_dates[0].date()} to {val_dates[-1].date()} ({len(val_dates):,} days)")
-        print(f"   ✓ Test:  {test_dates[0].date()} to {test_dates[-1].date()} ({len(test_dates):,} days)")
-
-        return train_dates, val_dates, test_dates
-
-    def train_ml_models(self, train_dates: pd.DatetimeIndex, val_dates: pd.DatetimeIndex) -> Dict:
-        """Train LightGBM models for each currency pair"""
-        print("\n" + "=" * 80)
-        print("4️⃣  TRAINING MACHINE LEARNING MODELS")
-        print("-" * 80)
-
-        self.ml_models = {}
-
-        for pair in CURRENCY_PAIRS:
-            if pair not in self.features or self.features[pair] is None:
-                print(f"\n   ⚠️  Skipping {pair}: No features available")
-                continue
-
-            print(f"\n🔧 Training LightGBM for {pair}...")
-
-            try:
-                # Get features and create target
-                pair_features = self.features[pair]
-
-                # Create target: next day return (classification: up/down)
-                returns = self.data[pair]['spot'].pct_change().shift(-1)
-                target = (returns > 0).astype(int)  # Binary classification
-
-                # Align features and target
-                combined = pd.concat([pair_features, target.rename('target')], axis=1)
-                combined = combined.dropna()
-
-                # Split data
-                train_data = combined.loc[combined.index.intersection(train_dates)]
-                val_data = combined.loc[combined.index.intersection(val_dates)]
-
-                if len(train_data) < 100 or len(val_data) < 50:
-                    print(f"   ⚠️  Insufficient data for {pair}")
+            # Check IV filter if enabled
+            if self.use_iv_filter and pair in historical_data:
+                hist = historical_data[pair]
+                if len(hist) < Config.IV_MA_DAYS:
                     continue
 
-                # Separate features and target
-                feature_cols = [col for col in train_data.columns if col != 'target']
-                X_train = train_data[feature_cols]
-                y_train = train_data['target']
-                X_val = val_data[feature_cols]
-                y_val = val_data['target']
+            for tenor in Config.TENORS:
+                if tenor not in market_data.atm_vols[pair]:
+                    continue
 
-                # Initialize and train model
-                lgb_model = LightGBMModel(model_type='signal')
-                lgb_model.train_signal_model(X_train, y_train, X_val, y_val)
+                atm_vol = market_data.atm_vols[pair][tenor]
+                T = self._tenor_to_years(tenor)
 
-                # Save model
-                model_path = RESULTS_DIR / f'lgb_model_{pair}.pkl'
-                lgb_model.save_model(str(model_path))
-                self.ml_models[pair] = lgb_model
+                # Apply IV filter
+                if self.use_iv_filter:
+                    iv_ma = hist[f'atm_vol_{tenor}'].tail(Config.IV_MA_DAYS).mean()
+                    if pd.isna(iv_ma):
+                        continue
 
-                print(f"   ✓ Model trained successfully")
+                # Evaluate at different deltas
+                for delta in Config.DELTAS:
+                    for option_type in ['call', 'put']:
+                        # Calculate strike from delta
+                        adj_delta = delta if option_type == 'call' else -delta
+                        strike = BlackScholes.strike_from_delta(
+                            spot, adj_delta, T, r_d, r_f, atm_vol, option_type
+                        )
 
-                # Print top features
-                if hasattr(lgb_model, 'feature_importance') and lgb_model.feature_importance is not None:
-                    top_features = lgb_model.feature_importance.head(5)
-                    print(f"   📊 Top 5 features:")
-                    for idx, row in top_features.iterrows():
-                        print(f"      - {row['feature']}: {row['importance']:.1f}")
+                        # Get market implied vol (from smile)
+                        market_vol = self._get_smile_vol(
+                            market_data, pair, tenor, strike / spot
+                        )
 
-            except Exception as e:
-                print(f"   ❌ Error training model for {pair}: {str(e)}")
-                continue
+                        # Calculate market price using Black-Scholes
+                        market_price = BlackScholes.price(
+                            spot, strike, T, r_d, r_f, market_vol, option_type
+                        )
 
-        print(f"\n✅ Successfully trained {len(self.ml_models)} ML models")
-        return self.ml_models
+                        # Calculate model price
+                        model_price = self._calculate_model_price(
+                            market_data, pair, spot, strike, T, r_d, r_f,
+                            tenor, option_type, historical_data
+                        )
 
-    def initialize_multi_model_strategies(self) -> List:
-        """Initialize all model-based trading strategies"""
-        print("\n" + "=" * 80)
-        print("5️⃣  INITIALIZING MULTI-MODEL STRATEGIES")
-        print("-" * 80)
+                        # Check for mispricing
+                        if market_price > 0:
+                            mispricing = (model_price - market_price) / market_price
 
-        self.strategies = []
+                            if abs(mispricing) > Config.MISPRICING_THRESHOLD:
+                                # Apply IV filter
+                                if self.use_iv_filter:
+                                    if mispricing > 0 and atm_vol < iv_ma:
+                                        continue  # Skip long if IV below MA
+                                    if mispricing < 0 and atm_vol > iv_ma:
+                                        continue  # Skip short if IV above MA
 
-        # 1. GVV Arbitrage Strategy
-        gvv_strategy = GVVArbitrageStrategy(
-            lookback_window=20,
-            mispricing_threshold=1.5,
-            enable_hedging=ENABLE_DELTA_HEDGING
-        )
-        self.strategies.append(gvv_strategy)
-        print(f"   ✓ GVV Arbitrage Strategy")
+                                signal = {
+                                    'pair': pair,
+                                    'tenor': tenor,
+                                    'strike': strike,
+                                    'option_type': option_type,
+                                    'spot': spot,
+                                    'market_price': market_price,
+                                    'model_price': model_price,
+                                    'mispricing': mispricing,
+                                    'direction': 1 if mispricing > 0 else -1,
+                                    'vol': market_vol,
+                                    'delta': delta
+                                }
+                                signals.append(signal)
 
-        # 2. SABR Volatility Strategy
-        sabr_strategy = SABRVolatilityStrategy(
-            calibration_window=60,
-            vol_threshold=2.0,
-            enable_hedging=ENABLE_DELTA_HEDGING
-        )
-        self.strategies.append(sabr_strategy)
-        print(f"   ✓ SABR Volatility Strategy")
+        # Sort by absolute mispricing and limit positions
+        signals.sort(key=lambda x: abs(x['mispricing']), reverse=True)
+        max_new = Config.MAX_POSITIONS - self.book.get_num_positions()
+        return signals[:max_new]
 
-        # 3. Model Consensus Strategy
-        consensus_strategy = ModelConsensusStrategy(
-            models=['gvv', 'sabr'],
-            consensus_threshold=0.7,
-            enable_hedging=ENABLE_DELTA_HEDGING
-        )
-        self.strategies.append(consensus_strategy)
-        print(f"   ✓ Model Consensus Strategy")
+    def _calculate_model_price(self, market_data: MarketData, pair: str,
+                               S: float, K: float, T: float, r_d: float, r_f: float,
+                               tenor: str, option_type: str,
+                               historical_data: Dict[str, pd.DataFrame]) -> float:
+        """Calculate theoretical price using selected model"""
 
-        # 4. ML Signal Strategies (one per pair)
-        if self.ml_models:
-            for pair, ml_model in self.ml_models.items():
-                ml_strategy = MLSignalStrategy(
-                    ml_model=ml_model,
-                    signal_threshold=0.6,
-                    enable_hedging=ENABLE_DELTA_HEDGING
+        if self.model_name == 'GVV':
+            rr_25 = market_data.rr_25[pair].get(tenor, 0)
+            bf_25 = market_data.bf_25[pair].get(tenor, 0)
+            atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
+            return GVVModel.price(S, K, T, r_d, r_f, atm_vol, rr_25, bf_25, option_type)
+
+        elif self.model_name == 'SABR':
+            atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
+            # Calibrate SABR if needed
+            if self.sabr_model.alpha is None:
+                strikes = np.array([S * 0.9, S, S * 1.1])
+                vols = np.array([atm_vol * 1.1, atm_vol, atm_vol * 1.1])
+                self.sabr_model.calibrate(strikes, vols, S, T)
+            return self.sabr_model.price(S, K, T, r_d, r_f, atm_vol, option_type)
+
+        elif self.model_name == 'LGBM':
+            features = self.lgbm_model.prepare_features(
+                market_data, pair, K, tenor, option_type,
+                historical_data.get(pair)
+            )
+            return self.lgbm_model.price(S, K, T, r_d, r_f, features)
+
+        else:  # GK/Black-Scholes
+            atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
+            return BlackScholes.price(S, K, T, r_d, r_f, atm_vol, option_type)
+
+    def _get_smile_vol(self, market_data: MarketData, pair: str,
+                       tenor: str, moneyness: float) -> float:
+        """Get implied vol from smile for given moneyness"""
+        atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
+        rr_25 = market_data.rr_25[pair].get(tenor, 0)
+        bf_25 = market_data.bf_25[pair].get(tenor, 0)
+
+        # Simple smile interpolation
+        if moneyness < 0.95:  # OTM put
+            return atm_vol + bf_25 - rr_25 / 2
+        elif moneyness > 1.05:  # OTM call
+            return atm_vol + bf_25 + rr_25 / 2
+        else:  # Near ATM
+            skew = rr_25 * (moneyness - 1.0) * 4
+            return atm_vol + bf_25 + skew
+
+    def _execute_trades(self, signals: List[Dict], market_data: MarketData):
+        """Execute trades based on signals"""
+        for signal in signals:
+            # Check margin/capital
+            premium = signal['market_price'] * signal['spot'] * abs(signal['direction'])
+
+            if signal['direction'] > 0:  # Buying
+                if self.book.cash < premium:
+                    continue  # Not enough cash
+            else:  # Selling (need margin)
+                required_margin = premium * 0.2  # 20% margin for short
+                if self.book.used_margin + required_margin > Config.INITIAL_CAPITAL * Config.MAX_LEVERAGE:
+                    continue  # Exceeds leverage limit
+
+            # Create position
+            T = self._tenor_to_years(signal['tenor'])
+            expiry = market_data.date + pd.Timedelta(days=int(T * 365))
+
+            position = OptionPosition(
+                entry_date=market_data.date,
+                expiry_date=expiry,
+                pair=signal['pair'],
+                strike=signal['strike'],
+                option_type=signal['option_type'],
+                position_size=signal['direction'],
+                entry_price=signal['market_price'],
+                entry_spot=signal['spot'],
+                entry_vol=signal['vol'],
+                model_used=self.model_name
+            )
+
+            # Update greeks
+            position.current_delta = self._calculate_delta(
+                signal['spot'], signal['strike'], T, r_d, r_f,
+                signal['vol'], signal['option_type'], market_data,
+                signal['pair'], signal['tenor']
+            )
+            position.current_vega = BlackScholes.vega(
+                signal['spot'], signal['strike'], T, r_d, r_f, signal['vol']
+            )
+
+            # Add to book
+            self.book.options.append(position)
+
+            # Update cash/margin
+            if signal['direction'] > 0:
+                self.book.cash -= premium * (1 + Config.OPTION_SPREAD)
+            else:
+                self.book.cash += premium * (1 - Config.OPTION_SPREAD)
+                self.book.used_margin += premium * 0.2
+
+            # Log trade
+            self.trades_log.append({
+                'date': market_data.date,
+                'pair': signal['pair'],
+                'strike': signal['strike'],
+                'option_type': signal['option_type'],
+                'direction': signal['direction'],
+                'premium': premium,
+                'mispricing': signal['mispricing']
+            })
+
+    def _delta_hedge(self, market_data: MarketData):
+        """Delta hedge the portfolio to stay within limits"""
+        net_delta = self.book.get_net_delta()
+
+        if abs(net_delta) > Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL:
+            # Need to hedge
+            hedge_amount = -net_delta
+
+            # Execute spot hedge (simplified - assumes single pair)
+            spot_price = list(market_data.spot.values())[0]
+            hedge_cost = abs(hedge_amount) * spot_price * Config.SPOT_SPREAD
+
+            self.book.spot_hedge += hedge_amount
+            self.book.cash -= hedge_cost
+
+            # Log hedge
+            self.hedges_log.append({
+                'date': market_data.date,
+                'hedge_amount': hedge_amount,
+                'spot_price': spot_price,
+                'cost': hedge_cost
+            })
+
+    def _update_positions(self, market_data: MarketData):
+        """Update existing positions with current market data"""
+        positions_to_remove = []
+
+        for i, pos in enumerate(self.book.options):
+            # Check if expired
+            if market_data.date >= pos.expiry_date:
+                # Calculate final P&L
+                spot = market_data.spot[pos.pair]
+                if pos.option_type == 'call':
+                    payoff = max(0, spot - pos.strike)
+                else:
+                    payoff = max(0, pos.strike - spot)
+
+                pos.pnl = (payoff - pos.entry_price) * pos.position_size * pos.entry_spot
+                self.book.cash += payoff * pos.position_size * pos.entry_spot
+
+                if pos.position_size < 0:  # Release margin for shorts
+                    self.book.used_margin -= pos.entry_price * pos.entry_spot * 0.2
+
+                positions_to_remove.append(i)
+            else:
+                # Update greeks and mark-to-market
+                spot = market_data.spot[pos.pair]
+                T = (pos.expiry_date - market_data.date).days / 365
+                vol = self._get_smile_vol(market_data, pos.pair,
+                                          self._years_to_tenor(T), pos.strike / spot)
+
+                # Get proper rates for the pair
+                if pos.pair == 'USDJPY':
+                    r_d = market_data.rates.get('USD', 0.05)
+                    r_f = market_data.rates.get('JPY', 0.01)
+                elif pos.pair == 'GBPNZD':
+                    r_d = market_data.rates.get('GBP', 0.04)
+                    r_f = market_data.rates.get('NZD', 0.03)
+                elif pos.pair == 'USDCAD':
+                    r_d = market_data.rates.get('USD', 0.05)
+                    r_f = market_data.rates.get('CAD', 0.04)
+                else:
+                    r_d = 0.05
+                    r_f = 0.01
+
+                pos.current_delta = self._calculate_delta(
+                    spot, pos.strike, T, r_d, r_f, vol, pos.option_type,
+                    market_data, pos.pair, self._years_to_tenor(T)
                 )
-                ml_strategy.name = f"ML_{pair}"
-                self.strategies.append(ml_strategy)
-                print(f"   ✓ ML Strategy for {pair}")
-
-        # 5. Traditional strategies for comparison
-        vol_arb = VolatilityArbitrageStrategy(
-            lookback_window=20,
-            zscore_threshold=1.5,
-            enable_hedging=ENABLE_DELTA_HEDGING,
-            hedge_threshold=HEDGE_THRESHOLD
-        )
-        self.strategies.append(vol_arb)
-        print(f"   ✓ Volatility Arbitrage (Traditional)")
-
-        carry_vol = CarryToVolStrategy(min_ratio=0.3)
-        self.strategies.append(carry_vol)
-        print(f"   ✓ Carry to Volatility")
-
-        print(f"\n✅ Total strategies initialized: {len(self.strategies)}")
-        return self.strategies
-
-    def run_multi_model_backtest(self, test_dates: pd.DatetimeIndex) -> Tuple[Dict, Dict, pd.DataFrame]:
-        """Run separate backtests for each strategy and combine results"""
-        print("\n" + "=" * 80)
-        print("6️⃣  RUNNING MULTI-MODEL BACKTEST")
-        print("-" * 80)
-        print(f"\n📅 Test Period: {test_dates[0].date()} to {test_dates[-1].date()}")
-        print(f"💰 Initial Capital: ${INITIAL_CAPITAL:,.0f}")
-        print(f"📉 Max Drawdown Limit: {MAX_DRAWDOWN:.1%}")
-
-        all_results = {}
-        all_trades = []
-
-        # Run backtest for each strategy separately
-        for i, strategy in enumerate(self.strategies, 1):
-            print(f"\n[{i}/{len(self.strategies)}] Testing {strategy.name}...")
-
-            try:
-                # Initialize engine for this strategy
-                engine = BacktestingEngine(initial_capital=INITIAL_CAPITAL)
-
-                # Run backtest with single strategy
-                backtest_results = engine.run_backtest(
-                    strategies=[strategy],
-                    data=self.data,
-                    start_date=test_dates[0],
-                    end_date=test_dates[-1],
-                    rebalance_freq=REBALANCE_FREQUENCY
+                pos.current_vega = BlackScholes.vega(
+                    spot, pos.strike, T, r_d, r_f, vol
                 )
+                pos.current_value = BlackScholes.price(
+                    spot, pos.strike, T, r_d, r_f, vol, pos.option_type
+                )
+                pos.pnl = (pos.current_value - pos.entry_price) * pos.position_size * pos.entry_spot
 
-                # Store results
-                all_results[strategy.name] = backtest_results
+        # Remove expired positions
+        for i in reversed(positions_to_remove):
+            del self.book.options[i]
 
-                # Add strategy name to trades
-                if 'trades' in backtest_results and len(backtest_results['trades']) > 0:
-                    trades = backtest_results['trades'].copy()
-                    trades['model'] = strategy.name
-                    all_trades.append(trades)
+    def _calculate_interest(self, market_data: MarketData):
+        """Calculate daily interest on cash/margin"""
+        daily_rate = market_data.rates.get('USD', 0.05) / 365
 
-                # Print summary for this strategy
-                perf = backtest_results.get('performance', {})
-                print(f"   📊 Results:")
-                print(f"      - Return: {perf.get('total_return', 0):.2%}")
-                print(f"      - Sharpe: {perf.get('sharpe_ratio', 0):.2f}")
-                print(f"      - Max DD: {perf.get('max_drawdown', 0):.2%}")
-                print(f"      - Trades: {perf.get('total_trades', 0)}")
-
-            except Exception as e:
-                print(f"   ❌ Error in {strategy.name}: {str(e)}")
-                continue
-
-        # Combine all trades
-        if all_trades:
-            combined_trades = pd.concat(all_trades, ignore_index=True)
+        if self.book.cash > 0:
+            # Earn interest on cash
+            self.book.cash *= (1 + daily_rate)
         else:
-            combined_trades = pd.DataFrame()
+            # Pay interest on borrowed funds
+            self.book.cash *= (1 + daily_rate * 1.5)  # Higher rate for borrowing
 
-        # Create combined portfolio
-        combined_results = self.combine_strategy_results(all_results)
+    def _record_stats(self, market_data: MarketData):
+        """Record daily statistics"""
+        total_value = self.book.cash + sum(pos.current_value * pos.position_size * pos.entry_spot
+                                           for pos in self.book.options)
 
-        print("\n" + "-" * 80)
-        print("📊 COMBINED PORTFOLIO RESULTS:")
-        combined_perf = combined_results.get('performance', {})
-        print(f"   - Total Return: {combined_perf.get('total_return', 0):.2%}")
-        print(f"   - Sharpe Ratio: {combined_perf.get('sharpe_ratio', 0):.2f}")
-        print(f"   - Max Drawdown: {combined_perf.get('max_drawdown', 0):.2%}")
-
-        return all_results, combined_results, combined_trades
-
-    def combine_strategy_results(self, all_results: Dict) -> Dict:
-        """Combine results from multiple strategies with equal weighting"""
-
-        # Get all equity curves
-        equity_curves = {}
-        for name, result in all_results.items():
-            if 'results' in result and len(result['results']) > 0:
-                equity_curves[name] = result['results']['equity']
-
-        if len(equity_curves) == 0:
-            return {
-                'results': pd.DataFrame(),
-                'performance': {},
-                'trades': pd.DataFrame()
-            }
-
-        # Align all equity curves to same dates
-        equity_df = pd.DataFrame(equity_curves)
-        equity_df = equity_df.fillna(method='ffill').fillna(INITIAL_CAPITAL)
-
-        # Calculate combined equity (equal weight)
-        combined_equity = equity_df.mean(axis=1)
-
-        # Calculate returns
-        combined_returns = combined_equity.pct_change().fillna(0)
-
-        # Create combined results DataFrame
-        combined_results_df = pd.DataFrame({
-            'equity': combined_equity,
-            'returns': combined_returns
+        self.equity_curve.append({
+            'date': market_data.date,
+            'equity': total_value,
+            'cash': self.book.cash,
+            'num_positions': self.book.get_num_positions(),
+            'net_delta': self.book.get_net_delta(),
+            'net_vega': self.book.get_net_vega(),
+            'used_margin': self.book.used_margin
         })
 
-        # Calculate performance metrics
-        analyzer = PerformanceAnalyzer()
-        combined_metrics = analyzer.calculate_metrics(
-            combined_returns,
-            combined_equity
-        )
+    def _tenor_to_years(self, tenor: str) -> float:
+        """Convert tenor to years"""
+        mapping = {
+            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
+            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
+            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
+            '1Y': 1.0
+        }
+        return mapping.get(tenor, 1 / 12)
 
-        return {
-            'results': combined_results_df,
-            'performance': combined_metrics,
-            'individual_results': all_results
+    def _years_to_tenor(self, years: float) -> str:
+        """Convert years to nearest tenor"""
+        if years <= 1 / 52:
+            return '1W'
+        elif years <= 1 / 12:
+            return '1M'
+        elif years <= 3 / 12:
+            return '3M'
+        elif years <= 6 / 12:
+            return '6M'
+        else:
+            return '1Y'
+
+
+# ==================== Data Loader ====================
+class DataLoader:
+    """Load and prepare market data"""
+
+    @staticmethod
+    def load_fx_data(path: Path) -> pd.DataFrame:
+        """Load FX data from parquet file"""
+        return pd.read_parquet(path)
+
+    @staticmethod
+    def load_curves_data(path: Path) -> pd.DataFrame:
+        """Load discount curves from parquet file"""
+        if path.exists():
+            return pd.read_parquet(path)
+        else:
+            print(f"Warning: Discount curves not found at {path}")
+            return None
+
+    @staticmethod
+    def get_rates_from_curves(curves_data: pd.DataFrame, date: pd.Timestamp) -> Dict[str, float]:
+        """Extract rates for each currency from discount curves"""
+        if curves_data is None:
+            # Fallback to default rates
+            return {'USD': 0.05, 'JPY': 0.01, 'GBP': 0.04, 'NZD': 0.03, 'CAD': 0.04}
+
+        # Get rates for the specific date
+        date_curves = curves_data[curves_data['date'] == date]
+
+        if date_curves.empty:
+            # Try nearest date
+            nearest_date = curves_data['date'].iloc[(curves_data['date'] - date).abs().argsort()[:1]].values[0]
+            date_curves = curves_data[curves_data['date'] == nearest_date]
+
+        if date_curves.empty:
+            return {'USD': 0.05, 'JPY': 0.01, 'GBP': 0.04, 'NZD': 0.03, 'CAD': 0.04}
+
+        # Get 3M rate as representative (could use different tenors for different currencies)
+        rates = {}
+
+        # USD rate from the curves
+        usd_3m = date_curves[date_curves['tenor'] == '3M']['interpolated_rate'].values
+        rates['USD'] = usd_3m[0] if len(usd_3m) > 0 else 0.05
+
+        # For other currencies, apply spreads (simplified - in practice would have separate curves)
+        rates['JPY'] = rates['USD'] - 0.04  # Japan typically lower rates
+        rates['GBP'] = rates['USD'] - 0.01  # UK similar to US
+        rates['NZD'] = rates['USD'] - 0.02  # NZ slightly lower
+        rates['CAD'] = rates['USD'] - 0.01  # Canada similar to US
+
+        return rates
+
+    @staticmethod
+    def get_forward_points(curves_data: pd.DataFrame, date: pd.Timestamp,
+                           pair: str, tenor: str) -> float:
+        """Calculate forward points from interest rate differential"""
+        if curves_data is None:
+            return 0.0
+
+        # Get rates for both currencies
+        rates = DataLoader.get_rates_from_curves(curves_data, date)
+
+        # Parse currency pair
+        if pair == 'USDJPY':
+            r_base = rates['USD']
+            r_quote = rates['JPY']
+        elif pair == 'GBPNZD':
+            r_base = rates['GBP']
+            r_quote = rates['NZD']
+        elif pair == 'USDCAD':
+            r_base = rates['USD']
+            r_quote = rates['CAD']
+        else:
+            return 0.0
+
+        # Get tenor in years
+        tenor_map = {
+            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
+            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
+            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
+            '1Y': 1.0
+        }
+        T = tenor_map.get(tenor, 1 / 12)
+
+        # Calculate forward points (simplified)
+        # Forward = Spot * exp((r_base - r_quote) * T)
+        # Forward points = Forward - Spot = Spot * (exp((r_base - r_quote) * T) - 1)
+        # This is approximate - actual market forward points include bid-ask and other factors
+
+        # For now, return simplified calculation
+        # In practice, would read from market data
+        forward_factor = np.exp((r_base - r_quote) * T) - 1
+
+        return forward_factor
+
+    @staticmethod
+    def prepare_market_data(fx_data: pd.DataFrame, date: pd.Timestamp,
+                            curves_data: pd.DataFrame = None) -> MarketData:
+        """Prepare market data for a specific date"""
+        if date not in fx_data.index:
+            return None
+
+        row = fx_data.loc[date]
+
+        # Get rates from discount curves
+        rates = DataLoader.get_rates_from_curves(curves_data, date) if curves_data is not None else {
+            'USD': 0.05, 'JPY': 0.01, 'GBP': 0.04, 'NZD': 0.03, 'CAD': 0.04
         }
 
-    def generate_comprehensive_visualizations(self, all_results: Dict, combined_results: Dict) -> None:
-        """Generate all visualizations for multi-model analysis"""
-        print("\n" + "=" * 80)
-        print("7️⃣  GENERATING VISUALIZATIONS")
-        print("-" * 80)
+        market = MarketData(
+            date=date,
+            spot={},
+            forwards={},
+            atm_vols={},
+            rr_25={},
+            bf_25={},
+            rr_10={},
+            bf_10={},
+            rates=rates
+        )
 
-        # Create visualizers
-        multi_viz = MultiModelVisualizer(output_dir=str(PLOTS_DIR))
-        trading_viz = TradingVisualizer(results_dir=str(PLOTS_DIR))
-        garch_viz = GARCHVisualizer(output_dir=str(PLOTS_DIR))
+        # Parse data for each pair
+        for pair in Config.PAIRS:
+            # Spot
+            spot_col = f'{pair} Curncy'
+            if spot_col in row.index:
+                market.spot[pair] = row[spot_col]
 
-        print("\n📊 Creating multi-model visualizations...")
+            # Forwards, vols, etc.
+            market.forwards[pair] = {}
+            market.atm_vols[pair] = {}
+            market.rr_25[pair] = {}
+            market.bf_25[pair] = {}
+            market.rr_10[pair] = {}
+            market.bf_10[pair] = {}
 
-        try:
-            # 1. Multi-strategy equity curves
-            multi_viz.plot_multi_strategy_equity_curves(all_results)
-            print("   ✓ Multi-strategy equity curves")
-        except Exception as e:
-            print(f"   ⚠️  Could not create equity curves: {e}")
+            for tenor in Config.TENORS:
+                # ATM vol
+                vol_col = f'{pair}V{tenor} Curncy'
+                if vol_col in row.index:
+                    market.atm_vols[pair][tenor] = row[vol_col] / 100
 
-        try:
-            # 2. Performance comparison
-            multi_viz.plot_performance_comparison(all_results)
-            print("   ✓ Performance comparison")
-        except Exception as e:
-            print(f"   ⚠️  Could not create performance comparison: {e}")
+                # Risk reversal and butterfly
+                rr_col = f'{pair}25R{tenor} Curncy'
+                if rr_col in row.index:
+                    market.rr_25[pair][tenor] = row[rr_col] / 100
 
-        try:
-            # 3. Strategy correlation matrix
-            multi_viz.plot_strategy_correlations(all_results)
-            print("   ✓ Strategy correlation matrix")
-        except Exception as e:
-            print(f"   ⚠️  Could not create correlation matrix: {e}")
+                bf_col = f'{pair}25B{tenor} Curncy'
+                if bf_col in row.index:
+                    market.bf_25[pair][tenor] = row[bf_col] / 100
 
-        try:
-            # 4. Model mispricing analysis
-            multi_viz.plot_model_mispricings(all_results)
-            print("   ✓ Model mispricing analysis")
-        except Exception as e:
-            print(f"   ⚠️  Could not create mispricing analysis: {e}")
-
-        # 5. Combined portfolio analysis
-        if len(combined_results.get('results', [])) > 0:
-            try:
-                trading_viz.plot_equity_curve(
-                    combined_results['results'],
-                    title="Combined Multi-Model Portfolio"
-                )
-                print("   ✓ Combined portfolio equity curve")
-
-                trading_viz.plot_rolling_sharpe(combined_results['results'], window=60)
-                print("   ✓ Rolling Sharpe ratio")
-
-                trading_viz.plot_returns_distribution(combined_results['results'])
-                print("   ✓ Returns distribution")
-            except Exception as e:
-                print(f"   ⚠️  Could not create combined portfolio plots: {e}")
-
-        # 6. GARCH analysis
-        try:
-            garch_viz.create_comprehensive_report(self.data, self.features)
-            print("   ✓ GARCH analysis report")
-        except Exception as e:
-            print(f"   ⚠️  Could not create GARCH report: {e}")
-
-        # 7. Volatility surfaces for key pairs
-        print("\n📊 Creating volatility surfaces...")
-        for pair in ['USDJPY', 'EURUSD', 'GBPUSD']:
-            if pair in self.data:
-                try:
-                    latest_date = self.data[pair].index[-1]
-                    trading_viz.plot_volatility_surface(self.data[pair], pair, latest_date)
-                    print(f"   ✓ {pair} volatility surface")
-                except Exception as e:
-                    print(f"   ⚠️  Could not create vol surface for {pair}: {e}")
-
-        # 8. 3D volatility surfaces for all pairs
-        print("\n📊 Creating 3D volatility surfaces...")
-        try:
-            create_enhanced_vol_surfaces(self.data, str(PLOTS_DIR))
-            print("   ✓ 3D volatility surfaces created")
-        except Exception as e:
-            print(f"   ⚠️ Could not create 3D vol surfaces: {e}")
-
-    def save_all_results(self, all_results: Dict, combined_results: Dict, combined_trades: pd.DataFrame) -> None:
-        """Save all results to files"""
-        print("\n" + "=" * 80)
-        print("8️⃣  SAVING RESULTS")
-        print("-" * 80)
-
-        # Save combined results
-        if len(combined_results.get('results', [])) > 0:
-            combined_results['results'].to_csv(RESULTS_DIR / 'combined_portfolio_results.csv')
-            print(f"   ✓ Combined portfolio results saved")
-
-        # Save individual strategy results
-        for strategy_name, results in all_results.items():
-            if 'results' in results and len(results['results']) > 0:
-                filename = f"strategy_{strategy_name.replace(' ', '_').lower()}_results.csv"
-                results['results'].to_csv(RESULTS_DIR / filename)
-
-        print(f"   ✓ Individual strategy results saved")
-
-        # Save all trades
-        if len(combined_trades) > 0:
-            combined_trades.to_csv(RESULTS_DIR / 'all_trades.csv', index=False)
-            print(f"   ✓ All trades saved ({len(combined_trades):,} total)")
-
-        # Save performance summary
-        perf_summary = []
-        for name, results in all_results.items():
-            if 'performance' in results:
-                perf = results['performance'].copy()
-                perf['strategy'] = name
-                perf_summary.append(perf)
-
-        if perf_summary:
-            perf_df = pd.DataFrame(perf_summary)
-            perf_df.to_csv(RESULTS_DIR / 'performance_summary.csv', index=False)
-            print(f"   ✓ Performance summary saved")
-
-        # Save ML models metadata
-        if self.ml_models:
-            ml_metadata = {
-                pair: {
-                    'trained': True,
-                    'model_path': str(RESULTS_DIR / f'lgb_model_{pair}.pkl')
-                }
-                for pair in self.ml_models.keys()
-            }
-            pd.DataFrame(ml_metadata).T.to_csv(RESULTS_DIR / 'ml_models_metadata.csv')
-            print(f"   ✓ ML models metadata saved")
-
-    def run(self) -> Tuple[Dict, Dict]:
-        """Main execution function"""
-        try:
-            # 1. Initialize system
-            if not self.initialize_system():
-                raise RuntimeError("System initialization failed")
-
-            # 2. Load and prepare data
-            self.loader, self.data = self.load_and_prepare_data()
-
-            # 3. Create enhanced features
-            self.features, self.models = self.create_enhanced_features()
-
-            # 4. Split data
-            train_dates, val_dates, test_dates = self.split_data()
-
-            # 5. Train ML models
-            self.ml_models = self.train_ml_models(train_dates, val_dates)
-
-            # 6. Initialize multi-model strategies
-            self.strategies = self.initialize_multi_model_strategies()
-
-            # 7. Run multi-model backtest
-            all_results, combined_results, combined_trades = self.run_multi_model_backtest(test_dates)
-
-            # 8. Generate visualizations
-            self.generate_comprehensive_visualizations(all_results, combined_results)
-
-            # 9. Save results
-            self.save_all_results(all_results, combined_results, combined_trades)
-
-            # Final summary
-            self.print_final_summary(combined_results)
-
-            return all_results, combined_results
-
-        except Exception as e:
-            print(f"\n❌ Critical error in system execution: {e}")
-            import traceback
-            traceback.print_exc()
-            return None, None
-
-    def print_final_summary(self, combined_results: Dict) -> None:
-        """Print final execution summary"""
-        print("\n" + "=" * 80)
-        print(" ✅ FX OPTIONS TRADING SYSTEM EXECUTION COMPLETE ".center(80))
-        print("=" * 80)
-
-        perf = combined_results.get('performance', {})
-
-        print(f"\n📊 FINAL PORTFOLIO SUMMARY:")
-        print(f"   💰 Total Return: {perf.get('total_return', 0):.2%}")
-        print(f"   📈 Annualized Return: {perf.get('annualized_return', 0):.2%}")
-        print(f"   📊 Sharpe Ratio: {perf.get('sharpe_ratio', 0):.3f}")
-        print(f"   📉 Max Drawdown: {perf.get('max_drawdown', 0):.2%}")
-        print(f"   🎯 Win Rate: {perf.get('win_rate', 0):.1%}")
-
-        # Check constraints
-        print(f"\n✅ CONSTRAINT VALIDATION:")
-        if abs(perf.get('max_drawdown', 0)) < MAX_DRAWDOWN:
-            print(f"   ✓ Drawdown constraint SATISFIED (limit: {MAX_DRAWDOWN:.1%})")
-        else:
-            print(f"   ❌ Drawdown constraint VIOLATED (limit: {MAX_DRAWDOWN:.1%})")
-
-        if perf.get('sharpe_ratio', 0) > 1.0:
-            print(f"   ✓ Sharpe ratio > 1.0 ACHIEVED")
-        else:
-            print(f"   ⚠️  Sharpe ratio below target of 1.0")
-
-        print(f"\n📁 Results saved to:")
-        print(f"   - Plots: {PLOTS_DIR}")
-        print(f"   - Data: {RESULTS_DIR}")
-
-        print(f"\n⏱️  Completion time: {datetime.now()}")
+        return market
 
 
+# ==================== Backtester ====================
+class Backtester:
+    """Run backtests for all models"""
+
+    def __init__(self, fx_data: pd.DataFrame, curves_data: pd.DataFrame = None):
+        self.fx_data = fx_data
+        self.curves_data = curves_data
+        self.results = {}
+
+    def run_all_models(self, start_date: pd.Timestamp, end_date: pd.Timestamp,
+                       delta_model: str = None):
+        """Run backtest for all models"""
+        models = ['GK', 'GVV', 'SABR', 'LGBM']
+
+        # Use provided delta model or default from config
+        delta_model = delta_model or Config.DELTA_MODEL
+
+        for model in models:
+            print(f"\nRunning backtest for {model} (Delta model: {delta_model})...")
+            strategy = OptionsArbitrageStrategy(model_name=model, delta_model=delta_model)
+            self._run_single_backtest(strategy, start_date, end_date)
+            self.results[f'{model}_delta{delta_model}'] = strategy.equity_curve
+
+        # Also run GK with IV filter
+        print(f"\nRunning backtest for GK with IV filter (Delta model: {delta_model})...")
+        strategy = OptionsArbitrageStrategy(model_name='GK', use_iv_filter=True,
+                                            delta_model=delta_model)
+        self._run_single_backtest(strategy, start_date, end_date)
+        self.results[f'GK_IVFilter_delta{delta_model}'] = strategy.equity_curve
+
+    def _run_single_backtest(self, strategy: OptionsArbitrageStrategy,
+                             start_date: pd.Timestamp, end_date: pd.Timestamp):
+        """Run backtest for a single strategy"""
+        dates = self.fx_data.index[(self.fx_data.index >= start_date) &
+                                   (self.fx_data.index <= end_date)]
+
+        # Keep historical data for features
+        historical_data = {}
+        for pair in Config.PAIRS:
+            historical_data[pair] = pd.DataFrame()
+
+        for i, date in enumerate(dates):
+            if i % 50 == 0:
+                print(f"  Processing {i}/{len(dates)} days...")
+
+            # Prepare market data with curves
+            market_data = DataLoader.prepare_market_data(self.fx_data, date, self.curves_data)
+            if market_data is None:
+                continue
+
+            # Update historical data
+            for pair in Config.PAIRS:
+                if pair in market_data.spot:
+                    new_row = pd.DataFrame({
+                        'date': [date],
+                        'spot': [market_data.spot[pair]]
+                    })
+                    for tenor in Config.TENORS:
+                        if tenor in market_data.atm_vols[pair]:
+                            new_row[f'atm_vol_{tenor}'] = market_data.atm_vols[pair][tenor]
+
+                    historical_data[pair] = pd.concat([historical_data[pair], new_row],
+                                                      ignore_index=True)
+
+            # Run daily strategy
+            strategy.run_daily(market_data, historical_data)
+
+    def calculate_performance_metrics(self) -> pd.DataFrame:
+        """Calculate performance metrics for all strategies"""
+        metrics = []
+
+        for model, equity_curve in self.results.items():
+            if not equity_curve:
+                continue
+
+            df = pd.DataFrame(equity_curve)
+            returns = df['equity'].pct_change().dropna()
+
+            metrics.append({
+                'Model': model,
+                'Total Return': (df['equity'].iloc[-1] / Config.INITIAL_CAPITAL - 1) * 100,
+                'Sharpe Ratio': returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0,
+                'Max Drawdown': ((df['equity'] / df['equity'].expanding().max() - 1).min()) * 100,
+                'Avg Positions': df['num_positions'].mean(),
+                'Total Trades': len([e for e in equity_curve if e['num_positions'] > 0])
+            })
+
+        return pd.DataFrame(metrics)
+
+    def plot_results(self):
+        """Plot equity curves and statistics"""
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+        # Equity curves
+        ax = axes[0, 0]
+        for model, equity_curve in self.results.items():
+            if equity_curve:
+                df = pd.DataFrame(equity_curve)
+                ax.plot(df['date'], df['equity'], label=model)
+        ax.set_title('Equity Curves')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Portfolio Value')
+        ax.legend()
+        ax.grid(True)
+
+        # Drawdown
+        ax = axes[0, 1]
+        for model, equity_curve in self.results.items():
+            if equity_curve:
+                df = pd.DataFrame(equity_curve)
+                dd = (df['equity'] / df['equity'].expanding().max() - 1) * 100
+                ax.plot(df['date'], dd, label=model)
+        ax.set_title('Drawdown')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Drawdown (%)')
+        ax.legend()
+        ax.grid(True)
+
+        # Number of positions
+        ax = axes[1, 0]
+        for model, equity_curve in self.results.items():
+            if equity_curve:
+                df = pd.DataFrame(equity_curve)
+                ax.plot(df['date'], df['num_positions'], label=model)
+        ax.set_title('Number of Positions')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Positions')
+        ax.legend()
+        ax.grid(True)
+
+        # Delta exposure
+        ax = axes[1, 1]
+        for model, equity_curve in self.results.items():
+            if equity_curve:
+                df = pd.DataFrame(equity_curve)
+                ax.plot(df['date'], df['net_delta'], label=model)
+        ax.set_title('Net Delta Exposure')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Delta')
+        ax.legend()
+        ax.grid(True)
+        ax.axhline(y=Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL,
+                   color='r', linestyle='--', label='Max Delta')
+        ax.axhline(y=-Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL,
+                   color='r', linestyle='--')
+
+        plt.tight_layout()
+        plt.savefig(Config.RESULTS_DIR / 'backtest_results.png')
+        plt.show()
+
+
+# ==================== Main Execution ====================
 def main():
-    """Main entry point"""
-    system = FXOptionsSystem()
-    all_results, combined_results = system.run()
-    return all_results, combined_results
+    """Main execution function"""
+    print("=" * 80)
+    print("FX OPTIONS TRADING SYSTEM")
+    print("=" * 80)
+
+    # Create directories
+    Config.DATA_DIR.mkdir(exist_ok=True)
+    Config.RESULTS_DIR.mkdir(exist_ok=True)
+
+    # Load FX data
+    print("\nLoading FX data...")
+    fx_data = DataLoader.load_fx_data(Config.FX_DATA_PATH)
+    print(f"Loaded {len(fx_data)} days of data")
+    print(f"Date range: {fx_data.index[0]} to {fx_data.index[-1]}")
+
+    # Load discount curves
+    print("\nLoading discount curves...")
+    curves_data = DataLoader.load_curves_data(Config.CURVES_PATH)
+    if curves_data is not None:
+        print(f"Loaded {len(curves_data)} curve points")
+        print(f"Tenors available: {sorted(curves_data['tenor'].unique())}")
+    else:
+        print("Discount curves not found. Generating them now...")
+        try:
+            # Import and run the curves generation
+            from src.curves import process_discount_curves
+
+            # Generate the curves
+            curves_data_generated = process_discount_curves(
+                data_dir=Config.DATA_DIR / "FRED",
+                output_dir=Config.DATA_DIR,
+                plot_dir=Config.RESULTS_DIR
+            )
+
+            # Try loading again
+            curves_data = DataLoader.load_curves_data(Config.CURVES_PATH)
+            if curves_data is not None:
+                print(f"Successfully generated and loaded {len(curves_data)} curve points")
+                print(f"Tenors available: {sorted(curves_data['tenor'].unique())}")
+            else:
+                print("Warning: Failed to generate curves, using default rates")
+        except Exception as e:
+            print(f"Error generating discount curves: {e}")
+            print("Warning: Using default rates instead of curves")
+
+    # Split data
+    n_days = len(fx_data)
+    train_end = int(n_days * 0.8)
+
+    train_data = fx_data.iloc[:train_end]
+    test_data = fx_data.iloc[train_end:]
+
+    print(f"\nTrain period: {train_data.index[0]} to {train_data.index[-1]}")
+    print(f"Test period: {test_data.index[0]} to {test_data.index[-1]}")
+
+    # Run backtests with curves data
+    print(f"\nUsing delta model: {Config.DELTA_MODEL}")
+    backtester = Backtester(fx_data, curves_data)
+    backtester.run_all_models(test_data.index[0], test_data.index[-1],
+                              delta_model=Config.DELTA_MODEL)
+
+    # Calculate and display metrics
+    print("\n" + "=" * 80)
+    print("PERFORMANCE METRICS")
+    print("=" * 80)
+    metrics = backtester.calculate_performance_metrics()
+    print(metrics.to_string(index=False))
+
+    # Save results
+    metrics.to_csv(Config.RESULTS_DIR / 'performance_metrics.csv', index=False)
+
+    # Plot results
+    print("\nGenerating plots...")
+    backtester.plot_results()
+
+    print("\n✅ Analysis complete!")
+    print(f"Results saved to {Config.RESULTS_DIR}")
 
 
 if __name__ == "__main__":
-    all_results, combined_results = main()
+    main()

@@ -5,7 +5,32 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="47662d6b-a19f-409d-b0cf-7071c48186d1" name="Changes" comment="-">
+      <change afterPath="$PROJECT_DIR$/main_backup.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/strategies/options_arbitrage.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/equity_curve.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/equity_curve.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/garch_analysis_GBPNZD.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/garch_analysis_GBPNZD.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/garch_analysis_USDCAD.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/garch_analysis_USDCAD.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/garch_analysis_USDJPY.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/garch_analysis_USDJPY.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/model_mispricings.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/model_mispricings.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/multi_model_equity_curves.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/multi_model_equity_curves.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/multi_model_performance.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/multi_model_performance.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/multivariate_garch_analysis.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/multivariate_garch_analysis.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/returns_distribution.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/returns_distribution.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/rolling_sharpe.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/rolling_sharpe.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/skew_evolution_GBPNZD.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/skew_evolution_GBPNZD.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/skew_evolution_USDCAD.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/skew_evolution_USDCAD.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/skew_evolution_USDJPY.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/skew_evolution_USDJPY.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/strategy_correlations.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/strategy_correlations.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/vol_heatmap_GBPNZD.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/vol_heatmap_GBPNZD.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/vol_heatmap_USDCAD.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/vol_heatmap_USDCAD.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/vol_heatmap_USDJPY.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/vol_heatmap_USDJPY.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/vol_smile_USDJPY.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/vol_smile_USDJPY.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/vol_surface_GBPNZD.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/vol_surface_GBPNZD.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/vol_surface_USDCAD.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/vol_surface_USDCAD.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plots/vol_surface_USDJPY.html" beforeDir="false" afterPath="$PROJECT_DIR$/plots/vol_surface_USDJPY.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/strategies/volatility_arbitrage.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/strategies/volatility_arbitrage.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -138,28 +163,6 @@
       <option name="INPUT_FILE" value="" />
       <method v="2" />
     </configuration>
-    <configuration name="features_enhanced" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
-      <module name="fx_case" />
-      <option name="ENV_FILES" value="" />
-      <option name="INTERPRETER_OPTIONS" value="" />
-      <option name="PARENT_ENVS" value="true" />
-      <envs>
-        <env name="PYTHONUNBUFFERED" value="1" />
-      </envs>
-      <option name="SDK_HOME" value="" />
-      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/src" />
-      <option name="IS_MODULE_SDK" value="true" />
-      <option name="ADD_CONTENT_ROOTS" value="true" />
-      <option name="ADD_SOURCE_ROOTS" value="true" />
-      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/src/features_enhanced.py" />
-      <option name="PARAMETERS" value="" />
-      <option name="SHOW_COMMAND_LINE" value="false" />
-      <option name="EMULATE_TERMINAL" value="false" />
-      <option name="MODULE_MODE" value="false" />
-      <option name="REDIRECT_INPUT" value="false" />
-      <option name="INPUT_FILE" value="" />
-      <method v="2" />
-    </configuration>
     <configuration name="main" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="fx_case" />
       <option name="ENV_FILES" value="" />
@@ -174,6 +177,28 @@
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/main.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="main_backup" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="fx_case" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="SCRIPT_NAME" value="C:\Dev\fx_case\main_backup.py" />
       <option name="PARAMETERS" value="" />
       <option name="SHOW_COMMAND_LINE" value="false" />
       <option name="EMULATE_TERMINAL" value="false" />
@@ -207,10 +232,10 @@
     <recent_temporary>
       <list>
         <item itemvalue="Python.main" />
+        <item itemvalue="Python.main_backup" />
         <item itemvalue="Python.data_loader" />
         <item itemvalue="Python.features" />
         <item itemvalue="Python.plots" />
-        <item itemvalue="Python.features_enhanced" />
       </list>
     </recent_temporary>
   </component>
@@ -327,7 +352,15 @@
       <option name="project" value="LOCAL" />
       <updated>1754587114361</updated>
     </task>
-    <option name="localTasksCounter" value="14" />
+    <task id="LOCAL-00014" summary="-">
+      <option name="closed" value="true" />
+      <created>1754587665552</created>
+      <option name="number" value="00014" />
+      <option name="presentableId" value="LOCAL-00014" />
+      <option name="project" value="LOCAL" />
+      <updated>1754587665552</updated>
+    </task>
+    <option name="localTasksCounter" value="15" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
@@ -387,6 +420,11 @@
           <url>file://$PROJECT_DIR$/src/strategies/multi_model_strategies.py</url>
           <line>128</line>
           <option name="timeStamp" value="25" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
+          <url>file://$PROJECT_DIR$/main_backup.py</url>
+          <line>186</line>
+          <option name="timeStamp" value="27" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>
