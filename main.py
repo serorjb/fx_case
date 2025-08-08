@@ -1,19 +1,17 @@
+# main.py
 """
-FX Options Trading System - Refactored Implementation
-Focuses on GK, SABR, and GK with IV Filter strategies
-Implements proper transaction costs and ensures no look-ahead bias
+FX Options Trading System - Complete Implementation
+Prices options using Black-Scholes, finds mispricings using various models,
+trades and delta hedges positions.
 """
 
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, field
-from scipy.stats import norm
-from scipy.optimize import minimize_scalar
 import warnings
-import matplotlib.pyplot as plt
 
 warnings.filterwarnings('ignore')
 
@@ -30,45 +28,24 @@ class Config:
     # Trading parameters
     INITIAL_CAPITAL = 10_000_000
     MAX_LEVERAGE = 5
-    MAX_POSITIONS = 100  # Reduced for better risk management
-    MAX_DELTA_EXPOSURE = 0.02  # 2% max delta exposure
-    MISPRICING_THRESHOLD = 0.015  # 1.5% mispricing to trade
-    MAX_DRAWDOWN = 0.10  # 10% max drawdown as per requirements
+    MAX_POSITIONS = 500
+    MAX_DELTA_EXPOSURE = 0.03  # 3% max delta at end of day
+    MISPRICING_THRESHOLD = 0.02  # 2% mispricing to trade
 
-    # Transaction costs - properly structured
-    TRANSACTION_COSTS = {
-        'spot': {
-            'USDJPY': 0.00002,  # 0.2 pips for majors
-            'GBPNZD': 0.00015,  # 1.5 pips for crosses
-            'USDCAD': 0.00003,  # 0.3 pips
-        },
-        'options': {
-            # Vol spreads by tenor (in vol points)
-            '1W': 0.005,   # 50 bps vol spread
-            '2W': 0.004,   # 40 bps
-            '3W': 0.004,   # 40 bps
-            '1M': 0.003,   # 30 bps
-            '2M': 0.0035,  # 35 bps
-            '3M': 0.004,   # 40 bps
-            '4M': 0.0045,  # 45 bps
-            '6M': 0.005,   # 50 bps
-            '9M': 0.006,   # 60 bps
-            '1Y': 0.007,   # 70 bps
-        },
-        # Additional costs
-        'brokerage': 0.00002,  # 0.2 bps of notional
-        'clearing': 0.00001,   # 0.1 bps of notional
-    }
+    # Transaction costs
+    SPOT_SPREAD = 0.0002  # 2 bps
+    OPTION_SPREAD = 0.0005  # 5 bps
 
     # Model parameters
+    LGBM_TRAINING_YEARS = 5
     IV_MA_DAYS = 20  # For IV filter strategy
-    VOL_REGIME_WINDOW = 60  # Days to calculate volatility regime
+    DELTA_MODEL = 'BS'  # Model for delta calculation: 'BS', 'GK', 'GVV', 'SABR'
 
     # Deltas to evaluate (as absolute values)
-    DELTAS = [0.10, 0.25, 0.40, 0.50]  # Focus on key strikes
+    DELTAS = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
 
     # Tenors to trade
-    TENORS = ['1W', '2W', '1M', '2M', '3M', '6M', '1Y']
+    TENORS = ['1W', '2W', '3W', '1M', '2M', '3M', '4M', '6M', '9M', '1Y']
 
     # Currency pairs
     PAIRS = ['USDJPY', 'GBPNZD', 'USDCAD']
@@ -84,75 +61,55 @@ class OptionPosition:
     strike: float
     option_type: str  # 'call' or 'put'
     position_size: float  # positive for long, negative for short
-    entry_price: float  # option premium
+    entry_price: float
     entry_spot: float
     entry_vol: float
     model_used: str
-    tenor: str
-    delta_at_entry: float
     current_delta: float = 0.0
     current_vega: float = 0.0
-    current_gamma: float = 0.0
     current_value: float = 0.0
     pnl: float = 0.0
-    days_held: int = 0
 
 
 @dataclass
 class TradingBook:
     """Manages all positions and hedges"""
     options: List[OptionPosition] = field(default_factory=list)
-    spot_hedges: Dict[str, float] = field(default_factory=dict)  # Spot hedge per currency pair
+    spot_hedge: float = 0.0  # Spot position for delta hedging
     cash: float = Config.INITIAL_CAPITAL
     used_margin: float = 0.0
-    peak_equity: float = Config.INITIAL_CAPITAL
-    current_drawdown: float = 0.0
 
-    def get_net_delta(self, pair: str = None) -> float:
+    def get_net_delta(self) -> float:
         """Calculate total portfolio delta"""
-        if pair:
-            option_delta = sum(
-                pos.current_delta * pos.position_size
-                for pos in self.options if pos.pair == pair
-            )
-            return option_delta + self.spot_hedges.get(pair, 0)
-        else:
-            total_delta = 0
-            for curr_pair in Config.PAIRS:
-                total_delta += self.get_net_delta(curr_pair)
-            return total_delta
+        option_delta = sum(pos.current_delta * pos.position_size for pos in self.options)
+        return option_delta + self.spot_hedge
 
     def get_net_vega(self) -> float:
         """Calculate total portfolio vega"""
         return sum(pos.current_vega * pos.position_size for pos in self.options)
 
-    def get_net_gamma(self) -> float:
-        """Calculate total portfolio gamma"""
-        return sum(pos.current_gamma * pos.position_size for pos in self.options)
-
-    def update_drawdown(self, current_equity: float):
-        """Update peak equity and drawdown"""
-        self.peak_equity = max(self.peak_equity, current_equity)
-        self.current_drawdown = (self.peak_equity - current_equity) / self.peak_equity
+    def get_num_positions(self) -> int:
+        """Count active positions"""
+        return len(self.options)
 
 
 @dataclass
 class MarketData:
     """Market data for a specific date"""
     date: pd.Timestamp
-    spot: Dict[str, float]
-    forwards: Dict[str, Dict[str, float]]
-    atm_vols: Dict[str, Dict[str, float]]
-    rr_25: Dict[str, Dict[str, float]]
-    bf_25: Dict[str, Dict[str, float]]
-    rr_10: Dict[str, Dict[str, float]]
-    bf_10: Dict[str, Dict[str, float]]
-    rates: Dict[str, float]
+    spot: Dict[str, float]  # spot prices by pair
+    forwards: Dict[str, Dict[str, float]]  # forward points by pair and tenor
+    atm_vols: Dict[str, Dict[str, float]]  # ATM vols by pair and tenor
+    rr_25: Dict[str, Dict[str, float]]  # 25-delta risk reversals
+    bf_25: Dict[str, Dict[str, float]]  # 25-delta butterflies
+    rr_10: Dict[str, Dict[str, float]]  # 10-delta risk reversals
+    bf_10: Dict[str, Dict[str, float]]  # 10-delta butterflies
+    rates: Dict[str, float]  # interest rates by currency
 
 
 # ==================== Pricing Models ====================
 class BlackScholes:
-    """Black-Scholes/Garman-Kohlhagen pricing for FX options"""
+    """Black-Scholes pricing for FX options"""
 
     @staticmethod
     def price(S: float, K: float, T: float, r_d: float, r_f: float,
@@ -161,7 +118,9 @@ class BlackScholes:
         if T <= 0:
             return max(0, S - K) if option_type == 'call' else max(0, K - S)
 
-        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        from scipy.stats import norm
+
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
 
         if option_type == 'call':
@@ -174,12 +133,11 @@ class BlackScholes:
               sigma: float, option_type: str) -> float:
         """Calculate option delta"""
         if T <= 0:
-            if option_type == 'call':
-                return 1.0 if S > K else 0.0
-            else:
-                return -1.0 if K > S else 0.0
+            return 1.0 if option_type == 'call' and S > K else 0.0
 
-        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        from scipy.stats import norm
+
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
 
         if option_type == 'call':
             return np.exp(-r_f * T) * norm.cdf(d1)
@@ -188,352 +146,277 @@ class BlackScholes:
 
     @staticmethod
     def vega(S: float, K: float, T: float, r_d: float, r_f: float, sigma: float) -> float:
-        """Calculate option vega (per 1% vol change)"""
+        """Calculate option vega"""
         if T <= 0:
             return 0.0
 
-        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-        return S * np.exp(-r_f * T) * norm.pdf(d1) * np.sqrt(T) / 100
+        from scipy.stats import norm
+
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        return S * np.exp(-r_f * T) * norm.pdf(d1) * np.sqrt(T) / 100  # Per 1% vol change
 
     @staticmethod
-    def gamma(S: float, K: float, T: float, r_d: float, r_f: float, sigma: float) -> float:
-        """Calculate option gamma"""
-        if T <= 0:
-            return 0.0
-
-        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-        return np.exp(-r_f * T) * norm.pdf(d1) / (S * sigma * np.sqrt(T))
-
-    @staticmethod
-    def implied_vol(option_price: float, S: float, K: float, T: float,
-                   r_d: float, r_f: float, option_type: str) -> float:
-        """Calculate implied volatility using Newton-Raphson"""
-        if T <= 0:
-            return 0.0
-
-        # Initial guess
-        sigma = 0.2
-
-        for _ in range(50):
-            price = BlackScholes.price(S, K, T, r_d, r_f, sigma, option_type)
-            vega = BlackScholes.vega(S, K, T, r_d, r_f, sigma) * 100  # Convert back
-
-            diff = option_price - price
-            if abs(diff) < 1e-6:
-                break
-
-            if abs(vega) < 1e-10:
-                break
-
-            sigma += diff / vega
-            sigma = max(0.001, min(sigma, 5.0))  # Keep in reasonable bounds
-
-        return sigma
+    def implied_vol_from_delta(delta: float, T: float, r_f: float,
+                               option_type: str, spot_vol: float) -> float:
+        """Get implied vol for a given delta strike"""
+        # Simplified - in practice would use proper inversion
+        if option_type == 'call':
+            if delta > 0.5:  # ITM call
+                return spot_vol * (1 - 0.1 * (delta - 0.5))
+            else:  # OTM call
+                return spot_vol * (1 + 0.1 * (0.5 - delta))
+        else:  # put
+            if delta < -0.5:  # ITM put
+                return spot_vol * (1 - 0.1 * (abs(delta) - 0.5))
+            else:  # OTM put
+                return spot_vol * (1 + 0.1 * (0.5 - abs(delta)))
 
     @staticmethod
     def strike_from_delta(S: float, delta: float, T: float, r_d: float, r_f: float,
-                         sigma: float, option_type: str) -> float:
+                          sigma: float, option_type: str) -> float:
         """Calculate strike from delta"""
+        from scipy.stats import norm
+
         if option_type == 'call':
             d1 = norm.ppf(delta * np.exp(r_f * T))
         else:
             d1 = -norm.ppf(-delta * np.exp(r_f * T))
 
-        K = S * np.exp(-(d1 * sigma * np.sqrt(T) - (r_d - r_f + 0.5 * sigma**2) * T))
+        K = S * np.exp(-(d1 * sigma * np.sqrt(T) - (r_d - r_f + 0.5 * sigma ** 2) * T))
         return K
 
 
+class GVVModel:
+    """Simplified GVV model implementation"""
+
+    @staticmethod
+    def price(S: float, K: float, T: float, r_d: float, r_f: float,
+              atm_vol: float, rr_25: float, bf_25: float, option_type: str) -> float:
+        """Price using GVV adjustment to Black-Scholes"""
+        # Calculate smile-adjusted volatility
+        moneyness = K / S
+
+        if moneyness < 0.95:  # Deep OTM put / ITM call region
+            smile_vol = atm_vol + bf_25 - rr_25 / 2 + 0.002 * (0.95 - moneyness)
+        elif moneyness > 1.05:  # Deep OTM call / ITM put region
+            smile_vol = atm_vol + bf_25 + rr_25 / 2 + 0.002 * (moneyness - 1.05)
+        else:  # Near ATM
+            skew_adjustment = rr_25 * (moneyness - 1.0) * 4  # Linear skew
+            smile_vol = atm_vol + bf_25 + skew_adjustment
+
+        # Price with adjusted vol
+        return BlackScholes.price(S, K, T, r_d, r_f, smile_vol, option_type)
+
+
 class SABRModel:
-    """SABR model for volatility smile"""
+    """Simplified SABR model"""
 
     def __init__(self):
-        self.alpha = 0.1
+        self.alpha = None
         self.beta = 0.5  # Fixed for FX
         self.rho = -0.3
         self.nu = 0.3
 
-    def calibrate(self, F: float, T: float, atm_vol: float, rr_25: float, bf_25: float):
-        """Calibrate SABR to market smile"""
-        # Set alpha to ATM vol as starting point
-        self.alpha = atm_vol
-
-        # Adjust rho based on risk reversal (skew)
-        self.rho = np.clip(-rr_25 * 10, -0.9, 0.9)  # Scale and clip
-
-        # Adjust nu based on butterfly (convexity)
-        self.nu = np.clip(bf_25 * 20 + 0.3, 0.1, 1.0)  # Scale and shift
-
-    def vol(self, F: float, K: float, T: float) -> float:
-        """Calculate SABR implied volatility"""
-        if abs(F - K) < 0.001 * F:  # ATM
-            return self.alpha
-
-        # Hagan's approximation
-        FK_mid = np.sqrt(F * K)
-        log_FK = np.log(F / K)
-
-        z = (self.nu / self.alpha) * FK_mid**(1 - self.beta) * log_FK
-        x_z = np.log((np.sqrt(1 - 2*self.rho*z + z**2) + z - self.rho) / (1 - self.rho))
-
-        if abs(x_z) < 0.001:
-            series_exp = 1.0
-        else:
-            series_exp = z / x_z
-
-        # First order approximation
-        sabr_vol = self.alpha * series_exp
-
-        # Add correction terms
-        term1 = ((1 - self.beta)**2 / 24) * (self.alpha**2 / FK_mid**(2*(1-self.beta)))
-        term2 = 0.25 * self.rho * self.beta * self.nu * self.alpha / FK_mid**(1-self.beta)
-        term3 = (2 - 3*self.rho**2) * self.nu**2 / 24
-
-        sabr_vol *= (1 + (term1 + term2 + term3) * T)
-
-        return sabr_vol
+    def calibrate(self, strikes: np.ndarray, vols: np.ndarray, F: float, T: float):
+        """Simple calibration - just set alpha to ATM vol"""
+        atm_idx = np.argmin(np.abs(strikes - F))
+        self.alpha = vols[atm_idx]
 
     def price(self, S: float, K: float, T: float, r_d: float, r_f: float,
-              atm_vol: float, rr_25: float, bf_25: float, option_type: str) -> float:
-        """Price option using SABR vol"""
+              atm_vol: float, option_type: str) -> float:
+        """Price using SABR vol"""
+        if self.alpha is None:
+            self.alpha = atm_vol
+
+        # Simplified SABR vol (Hagan approximation)
         F = S * np.exp((r_d - r_f) * T)
+        if abs(F - K) < 0.001:
+            sabr_vol = self.alpha
+        else:
+            z = (self.nu / self.alpha) * (F * K) ** ((1 - self.beta) / 2) * np.log(F / K)
+            x = np.log((np.sqrt(1 - 2 * self.rho * z + z ** 2) + z - self.rho) / (1 - self.rho))
+            sabr_vol = self.alpha * (z / x if abs(x) > 0.001 else 1.0)
 
-        # Calibrate to market smile
-        self.calibrate(F, T, atm_vol, rr_25, bf_25)
-
-        # Get SABR vol
-        sabr_vol = self.vol(F, K, T)
-
-        # Price with Black-Scholes using SABR vol
         return BlackScholes.price(S, K, T, r_d, r_f, sabr_vol, option_type)
 
 
-# ==================== Volatility Surface ====================
-class VolatilitySurface:
-    """Construct and interpolate volatility surface from market quotes"""
+# ==================== ML Model ====================
+class LGBMPricer:
+    """LightGBM model for option pricing"""
 
-    @staticmethod
-    def get_smile_vol(atm_vol: float, rr_25: float, bf_25: float,
-                     rr_10: float, bf_10: float, delta: float,
-                     option_type: str) -> float:
-        """Get implied vol for given delta from smile"""
+    def __init__(self, training_years: int = 5):
+        self.training_years = training_years
+        self.model = None
+        self.last_train_date = None
 
-        # Convert delta to signed delta for interpolation
-        signed_delta = delta if option_type == 'call' else -delta
+    def prepare_features(self, market_data: MarketData, pair: str,
+                         strike: float, tenor: str, option_type: str,
+                         historical_data: pd.DataFrame = None) -> np.ndarray:
+        """Prepare features for ML model"""
+        spot = market_data.spot[pair]
+        T = self._tenor_to_years(tenor)
 
-        # Market quotes give us vols at specific deltas
-        # ATM ~ 50 delta, 25 delta, 10 delta
+        # Basic features
+        features = [
+            T,  # Time to maturity
+            strike / spot,  # Moneyness
+            market_data.rates.get('USD', 0.05),  # Domestic rate
+            market_data.rates.get('JPY', 0.01),  # Foreign rate
+            market_data.atm_vols[pair].get(tenor, 0.1),  # ATM vol
+            market_data.rr_25[pair].get(tenor, 0),  # Risk reversal
+            market_data.bf_25[pair].get(tenor, 0),  # Butterfly
+        ]
 
-        if abs(signed_delta) <= 0.10:
-            # Near 10 delta - use 10 delta quotes
-            if option_type == 'put':
-                return atm_vol + bf_10 - rr_10/2
-            else:
-                return atm_vol + bf_10 + rr_10/2
-
-        elif abs(signed_delta) <= 0.25:
-            # Between 10 and 25 delta - interpolate
-            if option_type == 'put':
-                vol_10 = atm_vol + bf_10 - rr_10/2
-                vol_25 = atm_vol + bf_25 - rr_25/2
-            else:
-                vol_10 = atm_vol + bf_10 + rr_10/2
-                vol_25 = atm_vol + bf_25 + rr_25/2
-
-            # Linear interpolation
-            weight = (abs(signed_delta) - 0.10) / 0.15
-            return vol_10 * (1 - weight) + vol_25 * weight
-
-        elif abs(signed_delta) <= 0.50:
-            # Between 25 and 50 delta
-            if option_type == 'put':
-                vol_25 = atm_vol + bf_25 - rr_25/2
-            else:
-                vol_25 = atm_vol + bf_25 + rr_25/2
-
-            # Interpolate to ATM
-            weight = (abs(signed_delta) - 0.25) / 0.25
-            return vol_25 * (1 - weight) + atm_vol * weight
-
+        # Add historical vol if available
+        if historical_data is not None and len(historical_data) > 20:
+            returns = np.log(historical_data['spot'] / historical_data['spot'].shift(1))
+            realized_vol = returns.tail(20).std() * np.sqrt(252)
+            features.append(realized_vol)
         else:
-            # Beyond 50 delta - extrapolate carefully
-            if option_type == 'call':
-                vol_25 = atm_vol + bf_25 + rr_25/2
-            else:
-                vol_25 = atm_vol + bf_25 - rr_25/2
+            features.append(0.1)  # Default RV
 
-            # Modest extrapolation
-            return atm_vol + (atm_vol - vol_25) * (abs(signed_delta) - 0.50) / 0.25
+        # Add other model prices as features (would be calculated separately)
+        features.extend([0.0, 0.0, 0.0])  # Placeholder for GK, GVV, SABR prices
 
+        return np.array(features).reshape(1, -1)
 
-# ==================== Risk Management ====================
-class RiskManager:
-    """Manage portfolio risk and position sizing"""
+    def train(self, training_data: pd.DataFrame):
+        """Train the model on historical data"""
+        # Simplified - would implement full training logic
+        import lightgbm as lgb
 
-    def __init__(self, max_drawdown: float = 0.10):
-        self.max_drawdown = max_drawdown
-        self.current_var = 0.0
-        self.position_limits = {
-            'per_trade': 0.02,  # Max 2% risk per trade
-            'per_pair': 0.10,   # Max 10% exposure per pair
-            'total': 0.30       # Max 30% total exposure
+        # Prepare training data
+        X = training_data[['moneyness', 'time_to_maturity', 'atm_vol', 'rr', 'bf']].values
+        y = training_data['option_price'].values
+
+        # Train model
+        self.model = lgb.LGBMRegressor()
+        self.model.fit(X, y)
+
+    def price(self, S: float, K: float, T: float, r_d: float, r_f: float,
+              features: np.ndarray) -> float:
+        """Price option using trained model"""
+        if self.model is None:
+            # Fallback to Black-Scholes if not trained
+            return BlackScholes.price(S, K, T, r_d, r_f, 0.1, 'call')
+
+        return self.model.predict(features)[0]
+
+    def _tenor_to_years(self, tenor: str) -> float:
+        """Convert tenor to years"""
+        mapping = {
+            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
+            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
+            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
+            '1Y': 1.0
         }
-
-    def check_position_size(self, book: TradingBook, proposed_premium: float,
-                           pair: str) -> bool:
-        """Check if proposed position meets risk limits"""
-        current_equity = book.cash + sum(
-            pos.current_value * pos.position_size * pos.entry_spot
-            for pos in book.options
-        )
-
-        # Check drawdown limit
-        if book.current_drawdown >= self.max_drawdown * 0.8:  # 80% of max
-            return False
-
-        # Check per-trade limit
-        if proposed_premium > current_equity * self.position_limits['per_trade']:
-            return False
-
-        # Check per-pair limit
-        pair_exposure = sum(
-            abs(pos.current_value * pos.position_size * pos.entry_spot)
-            for pos in book.options if pos.pair == pair
-        )
-        if pair_exposure + proposed_premium > current_equity * self.position_limits['per_pair']:
-            return False
-
-        # Check total exposure
-        total_exposure = sum(
-            abs(pos.current_value * pos.position_size * pos.entry_spot)
-            for pos in book.options
-        )
-        if total_exposure + proposed_premium > current_equity * self.position_limits['total']:
-            return False
-
-        return True
-
-    def calculate_position_size(self, book: TradingBook, signal_strength: float,
-                               vol_regime: str) -> float:
-        """Calculate position size based on signal and regime"""
-        base_size = 1.0
-
-        # Adjust for signal strength
-        base_size *= min(abs(signal_strength) / 0.05, 2.0)  # Cap at 2x for strong signals
-
-        # Adjust for volatility regime
-        if vol_regime == 'high':
-            base_size *= 0.5  # Reduce in high vol
-        elif vol_regime == 'low':
-            base_size *= 1.2  # Increase in low vol
-
-        # Adjust for current drawdown
-        if book.current_drawdown > 0.05:
-            base_size *= (1 - book.current_drawdown / self.max_drawdown)
-
-        return np.clip(base_size, 0.1, 2.0)
+        return mapping.get(tenor, 1 / 12)
 
 
-# ==================== Trading Strategy ====================
+# ==================== Strategy ====================
 class OptionsArbitrageStrategy:
     """
-    Main trading strategy:
-    1. Prices options using Black-Scholes/SABR
-    2. Identifies mispricings
-    3. Trades and delta hedges positions
+    Main trading strategy that:
+    1. Prices options using Black-Scholes at various strikes
+    2. Compares with model prices (GVV, SABR, etc.)
+    3. Trades mispricings
+    4. Delta hedges positions
     """
 
-    def __init__(self, model_name: str, use_iv_filter: bool = False):
+    def __init__(self, model_name: str, use_iv_filter: bool = False,
+                 delta_model: str = None):
         self.model_name = model_name
         self.use_iv_filter = use_iv_filter
+        self.delta_model = delta_model or Config.DELTA_MODEL  # Use config default if not specified
         self.book = TradingBook()
         self.sabr_model = SABRModel()
-        self.risk_manager = RiskManager(Config.MAX_DRAWDOWN)
+        self.lgbm_model = LGBMPricer()
 
-        # Initialize spot hedges
-        for pair in Config.PAIRS:
-            self.book.spot_hedges[pair] = 0.0
+        # Initialize delta model if different from BS
+        self.delta_sabr_model = SABRModel() if self.delta_model == 'SABR' else None
 
         # Track performance
         self.equity_curve = []
         self.trades_log = []
         self.hedges_log = []
-        self.vol_regimes = []
+        self.daily_stats = []
 
-        # Record initial state
-        self.initial_equity_recorded = False
+    def _calculate_delta(self, spot: float, strike: float, T: float, r_d: float, r_f: float,
+                         vol: float, option_type: str, market_data: MarketData,
+                         pair: str, tenor: str) -> float:
+        """Calculate delta using the specified model"""
 
-    def run_daily(self, market_data: MarketData, historical_vol: Dict[str, pd.Series]):
+        if self.delta_model == 'BS' or self.delta_model == 'GK':
+            # Black-Scholes / Garman-Kohlhagen delta
+            return BlackScholes.delta(spot, strike, T, r_d, r_f, vol, option_type)
+
+        elif self.delta_model == 'GVV':
+            # GVV delta calculation
+            rr_25 = market_data.rr_25[pair].get(tenor, 0)
+            bf_25 = market_data.bf_25[pair].get(tenor, 0)
+
+            # Calculate GVV-adjusted volatility for this strike
+            moneyness = strike / spot
+            if moneyness < 0.95:
+                smile_vol = vol + bf_25 - rr_25 / 2 + 0.002 * (0.95 - moneyness)
+            elif moneyness > 1.05:
+                smile_vol = vol + bf_25 + rr_25 / 2 + 0.002 * (moneyness - 1.05)
+            else:
+                skew_adjustment = rr_25 * (moneyness - 1.0) * 4
+                smile_vol = vol + bf_25 + skew_adjustment
+
+            # Use adjusted vol for delta
+            return BlackScholes.delta(spot, strike, T, r_d, r_f, smile_vol, option_type)
+
+        elif self.delta_model == 'SABR':
+            # SABR delta calculation
+            if self.delta_sabr_model.alpha is None:
+                # Calibrate SABR if not done
+                strikes = np.array([spot * 0.9, spot, spot * 1.1])
+                vols = np.array([vol * 1.1, vol, vol * 1.1])
+                self.delta_sabr_model.calibrate(strikes, vols, spot, T)
+
+            # Calculate SABR vol for this strike
+            F = spot * np.exp((r_d - r_f) * T)
+            if abs(F - strike) < 0.001:
+                sabr_vol = self.delta_sabr_model.alpha
+            else:
+                z = (self.delta_sabr_model.nu / self.delta_sabr_model.alpha) * \
+                    (F * strike) ** ((1 - self.delta_sabr_model.beta) / 2) * np.log(F / strike)
+                x = np.log((np.sqrt(1 - 2 * self.delta_sabr_model.rho * z + z ** 2) + z -
+                            self.delta_sabr_model.rho) / (1 - self.delta_sabr_model.rho))
+                sabr_vol = self.delta_sabr_model.alpha * (z / x if abs(x) > 0.001 else 1.0)
+
+            # Use SABR vol for delta
+            return BlackScholes.delta(spot, strike, T, r_d, r_f, sabr_vol, option_type)
+
+        else:
+            # Default to Black-Scholes
+            return BlackScholes.delta(spot, strike, T, r_d, r_f, vol, option_type)
+
+    def run_daily(self, market_data: MarketData, historical_data: Dict[str, pd.DataFrame]):
         """Execute daily trading logic"""
 
-        # Record initial equity on first day
-        if not self.initial_equity_recorded:
-            self.equity_curve.append({
-                'date': market_data.date,
-                'equity': Config.INITIAL_CAPITAL,
-                'cash': Config.INITIAL_CAPITAL,
-                'options_value': 0,
-                'spot_hedge_value': 0,
-                'num_positions': 0,
-                'net_delta': 0,
-                'net_vega': 0,
-                'net_gamma': 0,
-                'used_margin': 0,
-                'drawdown': 0
-            })
-            self.initial_equity_recorded = True
-            return  # Don't trade on first day, just establish baseline
-
-        # 1. Determine volatility regime
-        vol_regime = self._determine_vol_regime(market_data, historical_vol)
-        self.vol_regimes.append({'date': market_data.date, 'regime': vol_regime})
-
-        # 2. Update existing positions
+        # 1. Update existing positions
         self._update_positions(market_data)
 
-        # 3. Check for stops/exits
-        self._check_exits(market_data)
+        # 2. Find new trading opportunities
+        signals = self._find_opportunities(market_data, historical_data)
 
-        # 4. Find new opportunities (only if not in drawdown)
-        if self.book.current_drawdown < Config.MAX_DRAWDOWN * 0.8:
-            signals = self._find_opportunities(market_data, historical_vol)
-            self._execute_trades(signals, market_data, vol_regime)
+        # 3. Execute trades
+        self._execute_trades(signals, market_data)
 
-        # 5. Delta hedge
+        # 4. Delta hedge
         self._delta_hedge(market_data)
 
-        # 6. Update P&L and statistics
-        self._update_pnl(market_data)
+        # 5. Calculate interest on cash/margin
+        self._calculate_interest(market_data)
 
-        # 7. Record daily statistics
+        # 6. Record daily statistics
         self._record_stats(market_data)
 
-    def _determine_vol_regime(self, market_data: MarketData,
-                             historical_vol: Dict[str, pd.Series]) -> str:
-        """Determine current volatility regime"""
-        if not historical_vol or 'USDJPY' not in historical_vol:
-            return 'normal'
-
-        hist = historical_vol['USDJPY']
-        if len(hist) < Config.VOL_REGIME_WINDOW:
-            return 'normal'
-
-        current_vol = np.mean([
-            market_data.atm_vols[pair].get('1M', 0.1)
-            for pair in Config.PAIRS if pair in market_data.atm_vols
-        ])
-
-        recent_vols = hist.tail(Config.VOL_REGIME_WINDOW)
-        percentile = (recent_vols < current_vol).sum() / len(recent_vols)
-
-        if percentile > 0.8:
-            return 'high'
-        elif percentile < 0.2:
-            return 'low'
-        else:
-            return 'normal'
-
     def _find_opportunities(self, market_data: MarketData,
-                          historical_vol: Dict[str, pd.Series]) -> List[Dict]:
+                            historical_data: Dict[str, pd.DataFrame]) -> List[Dict]:
         """Find mispriced options to trade"""
         signals = []
 
@@ -542,14 +425,26 @@ class OptionsArbitrageStrategy:
                 continue
 
             spot = market_data.spot[pair]
-            r_d, r_f = self._get_rates(pair, market_data)
+
+            # Get proper rates from curves for this pair
+            if pair == 'USDJPY':
+                r_d = market_data.rates.get('USD', 0.05)
+                r_f = market_data.rates.get('JPY', 0.01)
+            elif pair == 'GBPNZD':
+                r_d = market_data.rates.get('GBP', 0.04)
+                r_f = market_data.rates.get('NZD', 0.03)
+            elif pair == 'USDCAD':
+                r_d = market_data.rates.get('USD', 0.05)
+                r_f = market_data.rates.get('CAD', 0.04)
+            else:
+                r_d = 0.05
+                r_f = 0.01
 
             # Check IV filter if enabled
-            if self.use_iv_filter and pair in historical_vol:
-                hist = historical_vol[pair]
+            if self.use_iv_filter and pair in historical_data:
+                hist = historical_data[pair]
                 if len(hist) < Config.IV_MA_DAYS:
                     continue
-                iv_ma = hist.tail(Config.IV_MA_DAYS).mean()
 
             for tenor in Config.TENORS:
                 if tenor not in market_data.atm_vols[pair]:
@@ -558,16 +453,13 @@ class OptionsArbitrageStrategy:
                 atm_vol = market_data.atm_vols[pair][tenor]
                 T = self._tenor_to_years(tenor)
 
-                # Skip if too close to expiry
-                if T < 1/252:  # Less than 1 day
-                    continue
+                # Apply IV filter
+                if self.use_iv_filter:
+                    iv_ma = hist[f'atm_vol_{tenor}'].tail(Config.IV_MA_DAYS).mean()
+                    if pd.isna(iv_ma):
+                        continue
 
-                # Get smile parameters
-                rr_25 = market_data.rr_25[pair].get(tenor, 0)
-                bf_25 = market_data.bf_25[pair].get(tenor, 0)
-                rr_10 = market_data.rr_10[pair].get(tenor, 0)
-                bf_10 = market_data.bf_10[pair].get(tenor, 0)
-
+                # Evaluate at different deltas
                 for delta in Config.DELTAS:
                     for option_type in ['call', 'put']:
                         # Calculate strike from delta
@@ -576,39 +468,32 @@ class OptionsArbitrageStrategy:
                             spot, adj_delta, T, r_d, r_f, atm_vol, option_type
                         )
 
-                        # Get market vol from smile
-                        market_vol = VolatilitySurface.get_smile_vol(
-                            atm_vol, rr_25, bf_25, rr_10, bf_10,
-                            delta, option_type
+                        # Get market implied vol (from smile)
+                        market_vol = self._get_smile_vol(
+                            market_data, pair, tenor, strike / spot
                         )
 
-                        # Calculate market price
+                        # Calculate market price using Black-Scholes
                         market_price = BlackScholes.price(
                             spot, strike, T, r_d, r_f, market_vol, option_type
                         )
 
                         # Calculate model price
-                        if self.model_name == 'SABR':
-                            model_price = self.sabr_model.price(
-                                spot, strike, T, r_d, r_f,
-                                atm_vol, rr_25, bf_25, option_type
-                            )
-                        else:  # GK model
-                            # For GK, we use ATM vol (simplified)
-                            model_price = BlackScholes.price(
-                                spot, strike, T, r_d, r_f, atm_vol, option_type
-                            )
+                        model_price = self._calculate_model_price(
+                            market_data, pair, spot, strike, T, r_d, r_f,
+                            tenor, option_type, historical_data
+                        )
 
                         # Check for mispricing
-                        if market_price > 0 and model_price > 0:
+                        if market_price > 0:
                             mispricing = (model_price - market_price) / market_price
 
                             if abs(mispricing) > Config.MISPRICING_THRESHOLD:
                                 # Apply IV filter
                                 if self.use_iv_filter:
-                                    if mispricing > 0 and atm_vol < iv_ma * 0.95:
+                                    if mispricing > 0 and atm_vol < iv_ma:
                                         continue  # Skip long if IV below MA
-                                    if mispricing < 0 and atm_vol > iv_ma * 1.05:
+                                    if mispricing < 0 and atm_vol > iv_ma:
                                         continue  # Skip short if IV above MA
 
                                 signal = {
@@ -619,67 +504,83 @@ class OptionsArbitrageStrategy:
                                     'spot': spot,
                                     'market_price': market_price,
                                     'model_price': model_price,
-                                    'market_vol': market_vol,
                                     'mispricing': mispricing,
                                     'direction': 1 if mispricing > 0 else -1,
-                                    'delta': delta,
-                                    'time_to_expiry': T
+                                    'vol': market_vol,
+                                    'delta': delta
                                 }
                                 signals.append(signal)
 
-        # Sort by absolute mispricing
+        # Sort by absolute mispricing and limit positions
         signals.sort(key=lambda x: abs(x['mispricing']), reverse=True)
-
-        # Limit number of new positions
-        max_new = max(0, Config.MAX_POSITIONS - len(self.book.options))
+        max_new = Config.MAX_POSITIONS - self.book.get_num_positions()
         return signals[:max_new]
 
-    def _execute_trades(self, signals: List[Dict], market_data: MarketData,
-                       vol_regime: str):
+    def _calculate_model_price(self, market_data: MarketData, pair: str,
+                               S: float, K: float, T: float, r_d: float, r_f: float,
+                               tenor: str, option_type: str,
+                               historical_data: Dict[str, pd.DataFrame]) -> float:
+        """Calculate theoretical price using selected model"""
+
+        if self.model_name == 'GVV':
+            rr_25 = market_data.rr_25[pair].get(tenor, 0)
+            bf_25 = market_data.bf_25[pair].get(tenor, 0)
+            atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
+            return GVVModel.price(S, K, T, r_d, r_f, atm_vol, rr_25, bf_25, option_type)
+
+        elif self.model_name == 'SABR':
+            atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
+            # Calibrate SABR if needed
+            if self.sabr_model.alpha is None:
+                strikes = np.array([S * 0.9, S, S * 1.1])
+                vols = np.array([atm_vol * 1.1, atm_vol, atm_vol * 1.1])
+                self.sabr_model.calibrate(strikes, vols, S, T)
+            return self.sabr_model.price(S, K, T, r_d, r_f, atm_vol, option_type)
+
+        elif self.model_name == 'LGBM':
+            features = self.lgbm_model.prepare_features(
+                market_data, pair, K, tenor, option_type,
+                historical_data.get(pair)
+            )
+            return self.lgbm_model.price(S, K, T, r_d, r_f, features)
+
+        else:  # GK/Black-Scholes
+            atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
+            return BlackScholes.price(S, K, T, r_d, r_f, atm_vol, option_type)
+
+    def _get_smile_vol(self, market_data: MarketData, pair: str,
+                       tenor: str, moneyness: float) -> float:
+        """Get implied vol from smile for given moneyness"""
+        atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
+        rr_25 = market_data.rr_25[pair].get(tenor, 0)
+        bf_25 = market_data.bf_25[pair].get(tenor, 0)
+
+        # Simple smile interpolation
+        if moneyness < 0.95:  # OTM put
+            return atm_vol + bf_25 - rr_25 / 2
+        elif moneyness > 1.05:  # OTM call
+            return atm_vol + bf_25 + rr_25 / 2
+        else:  # Near ATM
+            skew = rr_25 * (moneyness - 1.0) * 4
+            return atm_vol + bf_25 + skew
+
+    def _execute_trades(self, signals: List[Dict], market_data: MarketData):
         """Execute trades based on signals"""
         for signal in signals:
-            # Calculate position size
-            position_size = self.risk_manager.calculate_position_size(
-                self.book, signal['mispricing'], vol_regime
-            )
+            # Check margin/capital
+            premium = signal['market_price'] * signal['spot'] * abs(signal['direction'])
 
-            # Calculate premium with transaction costs
-            notional = signal['spot'] * 1_000_000  # 1M notional per unit
-
-            # Option spread cost (half-spread for entry)
-            vol_spread = Config.TRANSACTION_COSTS['options'][signal['tenor']]
-            adjusted_vol = signal['market_vol'] + vol_spread * signal['direction'] * 0.5
-
-            # Recalculate price with adjusted vol
-            r_d, r_f = self._get_rates(signal['pair'], market_data)
-            adjusted_price = BlackScholes.price(
-                signal['spot'], signal['strike'], signal['time_to_expiry'],
-                r_d, r_f, adjusted_vol, signal['option_type']
-            )
-
-            # Total premium including all costs
-            option_premium = adjusted_price * notional * position_size
-            brokerage = notional * Config.TRANSACTION_COSTS['brokerage'] * position_size
-            clearing = notional * Config.TRANSACTION_COSTS['clearing'] * position_size
-            total_cost = option_premium + brokerage + clearing
-
-            # Check risk limits
-            if not self.risk_manager.check_position_size(
-                self.book, abs(total_cost), signal['pair']
-            ):
-                continue
-
-            # Check capital
             if signal['direction'] > 0:  # Buying
-                if self.book.cash < total_cost:
-                    continue
-            else:  # Selling - need margin
-                required_margin = abs(total_cost) * 0.3  # 30% margin
+                if self.book.cash < premium:
+                    continue  # Not enough cash
+            else:  # Selling (need margin)
+                required_margin = premium * 0.2  # 20% margin for short
                 if self.book.used_margin + required_margin > Config.INITIAL_CAPITAL * Config.MAX_LEVERAGE:
-                    continue
+                    continue  # Exceeds leverage limit
 
             # Create position
-            expiry = market_data.date + pd.Timedelta(days=int(signal['time_to_expiry'] * 365))
+            T = self._tenor_to_years(signal['tenor'])
+            expiry = market_data.date + pd.Timedelta(days=int(T * 365))
 
             position = OptionPosition(
                 entry_date=market_data.date,
@@ -687,304 +588,169 @@ class OptionsArbitrageStrategy:
                 pair=signal['pair'],
                 strike=signal['strike'],
                 option_type=signal['option_type'],
-                position_size=position_size * signal['direction'],
-                entry_price=adjusted_price,
+                position_size=signal['direction'],
+                entry_price=signal['market_price'],
                 entry_spot=signal['spot'],
-                entry_vol=adjusted_vol,
-                model_used=self.model_name,
-                tenor=signal['tenor'],
-                delta_at_entry=signal['delta'] * signal['direction']
+                entry_vol=signal['vol'],
+                model_used=self.model_name
             )
 
-            # Calculate initial Greeks
+            # Update greeks
             position.current_delta = BlackScholes.delta(
-                signal['spot'], signal['strike'], signal['time_to_expiry'],
-                r_d, r_f, adjusted_vol, signal['option_type']
-            ) * position_size * signal['direction']
-
+                signal['spot'], signal['strike'], T, 0.05, 0.01,
+                signal['vol'], signal['option_type']
+            )
             position.current_vega = BlackScholes.vega(
-                signal['spot'], signal['strike'], signal['time_to_expiry'],
-                r_d, r_f, adjusted_vol
-            ) * position_size * abs(signal['direction'])
-
-            position.current_gamma = BlackScholes.gamma(
-                signal['spot'], signal['strike'], signal['time_to_expiry'],
-                r_d, r_f, adjusted_vol
-            ) * position_size * abs(signal['direction'])
+                signal['spot'], signal['strike'], T, 0.05, 0.01, signal['vol']
+            )
 
             # Add to book
             self.book.options.append(position)
 
             # Update cash/margin
             if signal['direction'] > 0:
-                self.book.cash -= total_cost
+                self.book.cash -= premium * (1 + Config.OPTION_SPREAD)
             else:
-                self.book.cash += option_premium - brokerage - clearing
-                self.book.used_margin += required_margin
+                self.book.cash += premium * (1 - Config.OPTION_SPREAD)
+                self.book.used_margin += premium * 0.2
 
             # Log trade
             self.trades_log.append({
                 'date': market_data.date,
                 'pair': signal['pair'],
-                'tenor': signal['tenor'],
                 'strike': signal['strike'],
                 'option_type': signal['option_type'],
                 'direction': signal['direction'],
-                'size': position_size,
-                'premium': option_premium,
-                'total_cost': total_cost,
-                'mispricing': signal['mispricing'],
-                'vol_regime': vol_regime
+                'premium': premium,
+                'mispricing': signal['mispricing']
             })
 
     def _delta_hedge(self, market_data: MarketData):
-        """Delta hedge the portfolio by currency pair"""
-        for pair in Config.PAIRS:
-            if pair not in market_data.spot:
-                continue
+        """Delta hedge the portfolio to stay within limits"""
+        net_delta = self.book.get_net_delta()
 
-            # Calculate net delta for this pair
-            net_delta = self.book.get_net_delta(pair)
+        if abs(net_delta) > Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL:
+            # Need to hedge
+            hedge_amount = -net_delta
 
-            # Check if hedge needed (threshold based on notional)
-            threshold = Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL / market_data.spot[pair]
+            # Execute spot hedge (simplified - assumes single pair)
+            spot_price = list(market_data.spot.values())[0]
+            hedge_cost = abs(hedge_amount) * spot_price * Config.SPOT_SPREAD
 
-            if abs(net_delta) > threshold:
-                # Calculate hedge amount
-                hedge_amount = -net_delta
+            self.book.spot_hedge += hedge_amount
+            self.book.cash -= hedge_cost
 
-                # Calculate transaction cost
-                spot_spread = Config.TRANSACTION_COSTS['spot'][pair]
-                spot_price = market_data.spot[pair]
-
-                # Cost includes half-spread
-                hedge_cost = abs(hedge_amount) * spot_price * (spot_spread * 0.5)
-                hedge_cost += abs(hedge_amount) * spot_price * Config.TRANSACTION_COSTS['brokerage']
-
-                # Execute hedge
-                self.book.spot_hedges[pair] += hedge_amount
-                self.book.cash -= hedge_cost
-
-                # Log hedge
-                self.hedges_log.append({
-                    'date': market_data.date,
-                    'pair': pair,
-                    'hedge_amount': hedge_amount,
-                    'spot_price': spot_price,
-                    'cost': hedge_cost,
-                    'net_delta_before': net_delta,
-                    'net_delta_after': self.book.get_net_delta(pair)
-                })
+            # Log hedge
+            self.hedges_log.append({
+                'date': market_data.date,
+                'hedge_amount': hedge_amount,
+                'spot_price': spot_price,
+                'cost': hedge_cost
+            })
 
     def _update_positions(self, market_data: MarketData):
         """Update existing positions with current market data"""
         positions_to_remove = []
 
         for i, pos in enumerate(self.book.options):
-            # Update days held
-            pos.days_held = (market_data.date - pos.entry_date).days
-
             # Check if expired
             if market_data.date >= pos.expiry_date:
-                # Calculate final payoff
-                spot = market_data.spot.get(pos.pair, pos.entry_spot)
+                # Calculate final P&L
+                spot = market_data.spot[pos.pair]
                 if pos.option_type == 'call':
                     payoff = max(0, spot - pos.strike)
                 else:
                     payoff = max(0, pos.strike - spot)
 
-                # Final P&L
-                final_value = payoff
-                pos.pnl = (final_value - pos.entry_price) * abs(pos.position_size) * 1_000_000
+                pos.pnl = (payoff - pos.entry_price) * pos.position_size * pos.entry_spot
+                self.book.cash += payoff * pos.position_size * pos.entry_spot
 
-                # Update cash
-                self.book.cash += final_value * pos.position_size * 1_000_000
-
-                # Release margin if short
-                if pos.position_size < 0:
-                    self.book.used_margin -= abs(pos.entry_price * pos.position_size * 1_000_000 * 0.3)
+                if pos.position_size < 0:  # Release margin for shorts
+                    self.book.used_margin -= pos.entry_price * pos.entry_spot * 0.2
 
                 positions_to_remove.append(i)
             else:
-                # Update mark-to-market
-                spot = market_data.spot.get(pos.pair, pos.entry_spot)
-                T = max(0, (pos.expiry_date - market_data.date).days / 365)
+                # Update greeks and mark-to-market
+                spot = market_data.spot[pos.pair]
+                T = (pos.expiry_date - market_data.date).days / 365
+                vol = self._get_smile_vol(market_data, pos.pair,
+                                          self._years_to_tenor(T), pos.strike / spot)
 
-                if T > 0:
-                    # Get current market vol
-                    tenor = self._years_to_tenor(T)
-                    if tenor in market_data.atm_vols.get(pos.pair, {}):
-                        atm_vol = market_data.atm_vols[pos.pair][tenor]
-                        rr_25 = market_data.rr_25[pos.pair].get(tenor, 0)
-                        bf_25 = market_data.bf_25[pos.pair].get(tenor, 0)
-                        rr_10 = market_data.rr_10[pos.pair].get(tenor, 0)
-                        bf_10 = market_data.bf_10[pos.pair].get(tenor, 0)
+                # Get proper rates for the pair
+                if pos.pair == 'USDJPY':
+                    r_d = market_data.rates.get('USD', 0.05)
+                    r_f = market_data.rates.get('JPY', 0.01)
+                elif pos.pair == 'GBPNZD':
+                    r_d = market_data.rates.get('GBP', 0.04)
+                    r_f = market_data.rates.get('NZD', 0.03)
+                elif pos.pair == 'USDCAD':
+                    r_d = market_data.rates.get('USD', 0.05)
+                    r_f = market_data.rates.get('CAD', 0.04)
+                else:
+                    r_d = 0.05
+                    r_f = 0.01
 
-                        # Calculate current delta to get vol
-                        current_delta = abs(BlackScholes.delta(
-                            spot, pos.strike, T, *self._get_rates(pos.pair, market_data),
-                            atm_vol, pos.option_type
-                        ))
-
-                        current_vol = VolatilitySurface.get_smile_vol(
-                            atm_vol, rr_25, bf_25, rr_10, bf_10,
-                            current_delta, pos.option_type
-                        )
-                    else:
-                        current_vol = pos.entry_vol
-
-                    r_d, r_f = self._get_rates(pos.pair, market_data)
-
-                    # Update Greeks
-                    pos.current_delta = BlackScholes.delta(
-                        spot, pos.strike, T, r_d, r_f, current_vol, pos.option_type
-                    )
-                    pos.current_vega = BlackScholes.vega(
-                        spot, pos.strike, T, r_d, r_f, current_vol
-                    )
-                    pos.current_gamma = BlackScholes.gamma(
-                        spot, pos.strike, T, r_d, r_f, current_vol
-                    )
-
-                    # Update value
-                    pos.current_value = BlackScholes.price(
-                        spot, pos.strike, T, r_d, r_f, current_vol, pos.option_type
-                    )
-
-                    # Update P&L
-                    pos.pnl = (pos.current_value - pos.entry_price) * pos.position_size * 1_000_000
+                pos.current_delta = BlackScholes.delta(
+                    spot, pos.strike, T, r_d, r_f, vol, pos.option_type
+                )
+                pos.current_vega = BlackScholes.vega(
+                    spot, pos.strike, T, r_d, r_f, vol
+                )
+                pos.current_value = BlackScholes.price(
+                    spot, pos.strike, T, r_d, r_f, vol, pos.option_type
+                )
+                pos.pnl = (pos.current_value - pos.entry_price) * pos.position_size * pos.entry_spot
 
         # Remove expired positions
         for i in reversed(positions_to_remove):
             del self.book.options[i]
 
-    def _check_exits(self, market_data: MarketData):
-        """Check for stop-loss or take-profit exits"""
-        positions_to_close = []
+    def _calculate_interest(self, market_data: MarketData):
+        """Calculate daily interest on cash/margin"""
+        daily_rate = market_data.rates.get('USD', 0.05) / 365
 
-        for i, pos in enumerate(self.book.options):
-            # Stop-loss: -50% of premium
-            if pos.pnl < -0.5 * abs(pos.entry_price * pos.position_size * 1_000_000):
-                positions_to_close.append(i)
-                continue
-
-            # Take-profit: +100% of premium
-            if pos.pnl > 1.0 * abs(pos.entry_price * pos.position_size * 1_000_000):
-                positions_to_close.append(i)
-                continue
-
-            # Time decay exit: close if less than 2 days to expiry
-            days_to_expiry = (pos.expiry_date - market_data.date).days
-            if days_to_expiry <= 2:
-                positions_to_close.append(i)
-
-        # Close positions
-        for i in reversed(positions_to_close):
-            pos = self.book.options[i]
-
-            # Calculate exit costs
-            spot = market_data.spot.get(pos.pair, pos.entry_spot)
-            vol_spread = Config.TRANSACTION_COSTS['options'][pos.tenor]
-            exit_cost = abs(pos.current_value * pos.position_size * 1_000_000 * vol_spread * 0.5)
-
-            # Update cash
-            if pos.position_size > 0:  # Was long, now selling
-                self.book.cash += pos.current_value * pos.position_size * 1_000_000 - exit_cost
-            else:  # Was short, now buying back
-                self.book.cash -= pos.current_value * abs(pos.position_size) * 1_000_000 + exit_cost
-                self.book.used_margin -= abs(pos.entry_price * pos.position_size * 1_000_000 * 0.3)
-
-            del self.book.options[i]
-
-    def _update_pnl(self, market_data: MarketData):
-        """Update P&L including spot hedges"""
-        # Update spot hedge P&L
-        for pair in Config.PAIRS:
-            if pair in market_data.spot and self.book.spot_hedges[pair] != 0:
-                # Simple daily funding cost for spot position
-                funding_rate = 0.0001  # 1 bp per day
-                funding_cost = abs(self.book.spot_hedges[pair]) * market_data.spot[pair] * funding_rate
-                self.book.cash -= funding_cost
+        if self.book.cash > 0:
+            # Earn interest on cash
+            self.book.cash *= (1 + daily_rate)
+        else:
+            # Pay interest on borrowed funds
+            self.book.cash *= (1 + daily_rate * 1.5)  # Higher rate for borrowing
 
     def _record_stats(self, market_data: MarketData):
         """Record daily statistics"""
-        # Calculate total portfolio value
-        options_value = sum(
-            pos.current_value * pos.position_size * 1_000_000
-            for pos in self.book.options
-        )
+        total_value = self.book.cash + sum(pos.current_value * pos.position_size * pos.entry_spot
+                                           for pos in self.book.options)
 
-        spot_hedge_value = sum(
-            self.book.spot_hedges[pair] * market_data.spot.get(pair, 0)
-            for pair in Config.PAIRS
-        )
-
-        total_equity = self.book.cash + options_value + spot_hedge_value
-
-        # Update drawdown
-        self.book.update_drawdown(total_equity)
-
-        # Record stats
         self.equity_curve.append({
             'date': market_data.date,
-            'equity': total_equity,
+            'equity': total_value,
             'cash': self.book.cash,
-            'options_value': options_value,
-            'spot_hedge_value': spot_hedge_value,
-            'num_positions': len(self.book.options),
+            'num_positions': self.book.get_num_positions(),
             'net_delta': self.book.get_net_delta(),
             'net_vega': self.book.get_net_vega(),
-            'net_gamma': self.book.get_net_gamma(),
-            'used_margin': self.book.used_margin,
-            'drawdown': self.book.current_drawdown
+            'used_margin': self.book.used_margin
         })
 
-    def _get_rates(self, pair: str, market_data: MarketData) -> Tuple[float, float]:
-        """Get interest rates for currency pair"""
-        if pair == 'USDJPY':
-            r_d = market_data.rates.get('USD', 0.05)
-            r_f = market_data.rates.get('JPY', 0.01)
-        elif pair == 'GBPNZD':
-            r_d = market_data.rates.get('GBP', 0.04)
-            r_f = market_data.rates.get('NZD', 0.03)
-        elif pair == 'USDCAD':
-            r_d = market_data.rates.get('USD', 0.05)
-            r_f = market_data.rates.get('CAD', 0.04)
-        else:
-            r_d = 0.05
-            r_f = 0.02
-        return r_d, r_f
-
     def _tenor_to_years(self, tenor: str) -> float:
-        """Convert tenor string to years"""
+        """Convert tenor to years"""
         mapping = {
-            '1W': 1/52, '2W': 2/52, '3W': 3/52,
-            '1M': 1/12, '2M': 2/12, '3M': 3/12,
-            '4M': 4/12, '6M': 6/12, '9M': 9/12,
+            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
+            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
+            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
             '1Y': 1.0
         }
-        return mapping.get(tenor, 1/12)
+        return mapping.get(tenor, 1 / 12)
 
     def _years_to_tenor(self, years: float) -> str:
         """Convert years to nearest tenor"""
-        if years <= 1/52:
+        if years <= 1 / 52:
             return '1W'
-        elif years <= 2/52:
-            return '2W'
-        elif years <= 3/52:
-            return '3W'
-        elif years <= 1/12:
+        elif years <= 1 / 12:
             return '1M'
-        elif years <= 2/12:
-            return '2M'
-        elif years <= 3/12:
+        elif years <= 3 / 12:
             return '3M'
-        elif years <= 4/12:
-            return '4M'
-        elif years <= 6/12:
+        elif years <= 6 / 12:
             return '6M'
-        elif years <= 9/12:
-            return '9M'
         else:
             return '1Y'
 
@@ -999,21 +765,102 @@ class DataLoader:
         return pd.read_parquet(path)
 
     @staticmethod
-    def prepare_market_data(fx_data: pd.DataFrame, date: pd.Timestamp) -> MarketData:
-        """Prepare market data for specific date - no look-ahead"""
+    def load_curves_data(path: Path) -> pd.DataFrame:
+        """Load discount curves from parquet file"""
+        if path.exists():
+            return pd.read_parquet(path)
+        else:
+            print(f"Warning: Discount curves not found at {path}")
+            return None
+
+    @staticmethod
+    def get_rates_from_curves(curves_data: pd.DataFrame, date: pd.Timestamp) -> Dict[str, float]:
+        """Extract rates for each currency from discount curves"""
+        if curves_data is None:
+            # Fallback to default rates
+            return {'USD': 0.05, 'JPY': 0.01, 'GBP': 0.04, 'NZD': 0.03, 'CAD': 0.04}
+
+        # Get rates for the specific date
+        date_curves = curves_data[curves_data['date'] == date]
+
+        if date_curves.empty:
+            # Try nearest date
+            nearest_date = curves_data['date'].iloc[(curves_data['date'] - date).abs().argsort()[:1]].values[0]
+            date_curves = curves_data[curves_data['date'] == nearest_date]
+
+        if date_curves.empty:
+            return {'USD': 0.05, 'JPY': 0.01, 'GBP': 0.04, 'NZD': 0.03, 'CAD': 0.04}
+
+        # Get 3M rate as representative (could use different tenors for different currencies)
+        rates = {}
+
+        # USD rate from the curves
+        usd_3m = date_curves[date_curves['tenor'] == '3M']['interpolated_rate'].values
+        rates['USD'] = usd_3m[0] if len(usd_3m) > 0 else 0.05
+
+        # For other currencies, apply spreads (simplified - in practice would have separate curves)
+        rates['JPY'] = rates['USD'] - 0.04  # Japan typically lower rates
+        rates['GBP'] = rates['USD'] - 0.01  # UK similar to US
+        rates['NZD'] = rates['USD'] - 0.02  # NZ slightly lower
+        rates['CAD'] = rates['USD'] - 0.01  # Canada similar to US
+
+        return rates
+
+    @staticmethod
+    def get_forward_points(curves_data: pd.DataFrame, date: pd.Timestamp,
+                           pair: str, tenor: str) -> float:
+        """Calculate forward points from interest rate differential"""
+        if curves_data is None:
+            return 0.0
+
+        # Get rates for both currencies
+        rates = DataLoader.get_rates_from_curves(curves_data, date)
+
+        # Parse currency pair
+        if pair == 'USDJPY':
+            r_base = rates['USD']
+            r_quote = rates['JPY']
+        elif pair == 'GBPNZD':
+            r_base = rates['GBP']
+            r_quote = rates['NZD']
+        elif pair == 'USDCAD':
+            r_base = rates['USD']
+            r_quote = rates['CAD']
+        else:
+            return 0.0
+
+        # Get tenor in years
+        tenor_map = {
+            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
+            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
+            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
+            '1Y': 1.0
+        }
+        T = tenor_map.get(tenor, 1 / 12)
+
+        # Calculate forward points (simplified)
+        # Forward = Spot * exp((r_base - r_quote) * T)
+        # Forward points = Forward - Spot = Spot * (exp((r_base - r_quote) * T) - 1)
+        # This is approximate - actual market forward points include bid-ask and other factors
+
+        # For now, return simplified calculation
+        # In practice, would read from market data
+        forward_factor = np.exp((r_base - r_quote) * T) - 1
+
+        return forward_factor
+
+    @staticmethod
+    def prepare_market_data(fx_data: pd.DataFrame, date: pd.Timestamp,
+                            curves_data: pd.DataFrame = None) -> MarketData:
+        """Prepare market data for a specific date"""
         if date not in fx_data.index:
             return None
 
-        # Only use data available up to this date
         row = fx_data.loc[date]
 
-        # Default rates
-        rates = {
-            'USD': 0.05,
-            'JPY': 0.01,
-            'GBP': 0.04,
-            'NZD': 0.03,
-            'CAD': 0.04
+        # Get rates from discount curves
+        rates = DataLoader.get_rates_from_curves(curves_data, date) if curves_data is not None else {
+            'USD': 0.05, 'JPY': 0.01, 'GBP': 0.04, 'NZD': 0.03, 'CAD': 0.04
         }
 
         market = MarketData(
@@ -1030,12 +877,13 @@ class DataLoader:
 
         # Parse data for each pair
         for pair in Config.PAIRS:
-            # Spot price
+            # Spot
             spot_col = f'{pair} Curncy'
-            if spot_col in row.index and not pd.isna(row[spot_col]):
+            if spot_col in row.index:
                 market.spot[pair] = row[spot_col]
 
-            # Initialize dicts
+            # Forwards, vols, etc.
+            market.forwards[pair] = {}
             market.atm_vols[pair] = {}
             market.rr_25[pair] = {}
             market.bf_25[pair] = {}
@@ -1045,369 +893,194 @@ class DataLoader:
             for tenor in Config.TENORS:
                 # ATM vol
                 vol_col = f'{pair}V{tenor} Curncy'
-                if vol_col in row.index and not pd.isna(row[vol_col]):
+                if vol_col in row.index:
                     market.atm_vols[pair][tenor] = row[vol_col] / 100
 
-                # 25-delta risk reversal
-                rr25_col = f'{pair}25R{tenor} Curncy'
-                if rr25_col in row.index and not pd.isna(row[rr25_col]):
-                    market.rr_25[pair][tenor] = row[rr25_col] / 100
+                # Risk reversal and butterfly
+                rr_col = f'{pair}25R{tenor} Curncy'
+                if rr_col in row.index:
+                    market.rr_25[pair][tenor] = row[rr_col] / 100
 
-                # 25-delta butterfly
-                bf25_col = f'{pair}25B{tenor} Curncy'
-                if bf25_col in row.index and not pd.isna(row[bf25_col]):
-                    market.bf_25[pair][tenor] = row[bf25_col] / 100
-
-                # 10-delta risk reversal
-                rr10_col = f'{pair}10R{tenor} Curncy'
-                if rr10_col in row.index and not pd.isna(row[rr10_col]):
-                    market.rr_10[pair][tenor] = row[rr10_col] / 100
-
-                # 10-delta butterfly
-                bf10_col = f'{pair}10B{tenor} Curncy'
-                if bf10_col in row.index and not pd.isna(row[bf10_col]):
-                    market.bf_10[pair][tenor] = row[bf10_col] / 100
+                bf_col = f'{pair}25B{tenor} Curncy'
+                if bf_col in row.index:
+                    market.bf_25[pair][tenor] = row[bf_col] / 100
 
         return market
 
 
 # ==================== Backtester ====================
 class Backtester:
-    """Run backtests for models"""
+    """Run backtests for GK, SABR, and GK_IVFilter models"""
 
-    def __init__(self, fx_data: pd.DataFrame):
+    def __init__(self, fx_data: pd.DataFrame, curves_data: pd.DataFrame = None):
         self.fx_data = fx_data
+        self.curves_data = curves_data
         self.results = {}
 
-    def run_backtest(self, start_date: pd.Timestamp, end_date: pd.Timestamp):
-        """Run backtest for all models"""
-        models = [
-            ('GK', False),       # Garman-Kohlhagen
-            ('SABR', False),     # SABR model
-            ('GK_IVFilter', True)  # GK with IV filter
-        ]
+    def run_all_models(self, start_date: pd.Timestamp, end_date: pd.Timestamp):
+        """Run backtest for GK, SABR, and GK with IV filter"""
+        models = ['GK', 'SABR']
 
-        for model_name, use_filter in models:
-            print(f"\nRunning backtest for {model_name}...")
-
-            # Use correct model name for strategy
-            actual_model = 'GK' if model_name == 'GK_IVFilter' else model_name
-            strategy = OptionsArbitrageStrategy(
-                model_name=actual_model,
-                use_iv_filter=use_filter
-            )
-
+        for model in models:
+            print(f"\nRunning backtest for {model}...")
+            strategy = OptionsArbitrageStrategy(model_name=model)
             self._run_single_backtest(strategy, start_date, end_date)
-            self.results[model_name] = {
-                'equity_curve': strategy.equity_curve,
-                'trades': strategy.trades_log,
-                'hedges': strategy.hedges_log,
-                'vol_regimes': strategy.vol_regimes
-            }
+            self.results[model] = strategy.equity_curve
+
+        # Also run GK with IV filter
+        print(f"\nRunning backtest for GK with IV filter...")
+        strategy = OptionsArbitrageStrategy(model_name='GK', use_iv_filter=True)
+        self._run_single_backtest(strategy, start_date, end_date)
+        self.results['GK_IVFilter'] = strategy.equity_curve
 
     def _run_single_backtest(self, strategy: OptionsArbitrageStrategy,
-                            start_date: pd.Timestamp, end_date: pd.Timestamp):
-        """Run backtest for single strategy"""
-        # Get date range
-        dates = self.fx_data.index[
-            (self.fx_data.index >= start_date) &
-            (self.fx_data.index <= end_date)
-        ]
+                             start_date: pd.Timestamp, end_date: pd.Timestamp):
+        """Run backtest for a single strategy"""
+        dates = self.fx_data.index[(self.fx_data.index >= start_date) &
+                                   (self.fx_data.index <= end_date)]
 
-        # Build historical volatility data (no look-ahead)
-        historical_vol = {}
-        for pair in Config.PAIRS:
-            historical_vol[pair] = pd.Series(dtype=float)
+        historical_data = {pair: pd.DataFrame() for pair in Config.PAIRS}
 
         for i, date in enumerate(dates):
             if i % 50 == 0:
                 print(f"  Processing {i}/{len(dates)} days...")
 
-            # Prepare market data (only current day)
-            market_data = DataLoader.prepare_market_data(self.fx_data, date)
+            market_data = DataLoader.prepare_market_data(self.fx_data, date, self.curves_data)
             if market_data is None:
                 continue
 
-            # Run strategy
-            strategy.run_daily(market_data, historical_vol)
-
-            # Update historical vol (for next day)
             for pair in Config.PAIRS:
-                if pair in market_data.atm_vols:
-                    # Use 1M ATM vol as representative
-                    if '1M' in market_data.atm_vols[pair]:
-                        vol_value = market_data.atm_vols[pair]['1M']
-                        historical_vol[pair] = pd.concat([
-                            historical_vol[pair],
-                            pd.Series([vol_value], index=[date])
-                        ])
+                if pair in market_data.spot:
+                    new_row = pd.DataFrame({
+                        'date': [date],
+                        'spot': [market_data.spot[pair]]
+                    })
+                    for tenor in Config.TENORS:
+                        if tenor in market_data.atm_vols[pair]:
+                            new_row[f'atm_vol_{tenor}'] = market_data.atm_vols[pair][tenor]
+                    historical_data[pair] = pd.concat([historical_data[pair], new_row], ignore_index=True)
 
-    def calculate_metrics(self) -> pd.DataFrame:
-        """Calculate performance metrics"""
+            strategy.run_daily(market_data, historical_data)
+
+    def calculate_performance_metrics(self) -> pd.DataFrame:
+        """Calculate performance metrics for all strategies"""
         metrics = []
 
-        # Find normalization start date (when all strategies reached capacity)
-        max_capacity_dates = {}
-        for model_name, results in self.results.items():
-            if results['equity_curve']:
-                df = pd.DataFrame(results['equity_curve'])
-                capacity_threshold = Config.MAX_POSITIONS * 0.8
-                mask = df['num_positions'] >= capacity_threshold
-                if mask.any():
-                    max_capacity_dates[model_name] = df.loc[mask.idxmax(), 'date']
-
-        if max_capacity_dates:
-            start_date = max(max_capacity_dates.values())
-        else:
-            # Fallback: use 30 days after start
-            start_date = None
-            for results in self.results.values():
-                if results['equity_curve'] and len(results['equity_curve']) > 30:
-                    start_date = results['equity_curve'][30]['date']
-                    break
-
-        for model_name, results in self.results.items():
-            equity_curve = results['equity_curve']
+        for model, equity_curve in self.results.items():
             if not equity_curve:
                 continue
 
             df = pd.DataFrame(equity_curve)
-
-            # Filter from steady state if we have a start date
-            if start_date:
-                df = df[df['date'] >= start_date].copy()
-                if not df.empty:
-                    # Normalize equity from this point
-                    initial_equity = df.iloc[0]['equity']
-                    df['equity'] = (df['equity'] / initial_equity) * Config.INITIAL_CAPITAL
-
-            if df.empty:
-                continue
-
-            # Calculate returns
-            df['returns'] = df['equity'].pct_change()
-
-            # Calculate metrics from normalized data
-            total_return = (df['equity'].iloc[-1] / Config.INITIAL_CAPITAL - 1) * 100
-
-            # Sharpe ratio
-            if df['returns'].std() > 0:
-                sharpe = df['returns'].mean() / df['returns'].std() * np.sqrt(252)
-            else:
-                sharpe = 0
-
-            # Max drawdown (recalculated)
-            running_max = df['equity'].expanding().max()
-            drawdown = ((df['equity'] - running_max) / running_max).min()
-            max_dd = abs(drawdown) * 100
-
-            # Trade statistics
-            trades = results['trades']
-            num_trades = len(trades)
-            if num_trades > 0:
-                trades_df = pd.DataFrame(trades)
-                # Only count trades after steady state
-                if start_date:
-                    trades_df = trades_df[trades_df['date'] >= start_date]
-                    num_trades = len(trades_df)
-                if len(trades_df) > 0:
-                    win_rate = (trades_df['mispricing'] * trades_df['direction'] > 0).mean() * 100
-                else:
-                    win_rate = 0
-            else:
-                win_rate = 0
+            returns = df['equity'].pct_change().dropna()
 
             metrics.append({
-                'Model': model_name,
-                'Total Return (%)': round(total_return, 2),
-                'Sharpe Ratio': round(sharpe, 2),
-                'Max Drawdown (%)': round(max_dd, 2),
-                'Num Trades': num_trades,
-                'Win Rate (%)': round(win_rate, 1),
-                'Avg Positions': round(df['num_positions'].mean(), 1)
+                'Model': model,
+                'Total Return': (df['equity'].iloc[-1] / Config.INITIAL_CAPITAL - 1) * 100,
+                'Sharpe Ratio': returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0,
+                'Max Drawdown': ((df['equity'] / df['equity'].expanding().max() - 1).min()) * 100,
+                'Avg Positions': df['num_positions'].mean(),
+                'Total Trades': len([e for e in equity_curve if e['num_positions'] > 0])
             })
 
         return pd.DataFrame(metrics)
 
     def plot_results(self):
-        """Plot equity curves and drawdowns"""
-        # Find when all strategies first reach max capacity
-        max_capacity_dates = {}
-        for model_name, results in self.results.items():
-            if results['equity_curve']:
-                df = pd.DataFrame(results['equity_curve'])
-                # Find first date where positions reach 80% of max capacity
-                capacity_threshold = Config.MAX_POSITIONS * 0.8
-                mask = df['num_positions'] >= capacity_threshold
-                if mask.any():
-                    max_capacity_dates[model_name] = df.loc[mask.idxmax(), 'date']
+        """Plot equity curves and statistics for GK, SABR, and GK_IVFilter"""
+        import matplotlib.pyplot as plt
 
-        # Use the latest date when all models reached capacity
-        if max_capacity_dates:
-            start_date = max(max_capacity_dates.values())
-        else:
-            # Fallback: start after 30 days to allow position buildup
-            start_date = None
-            for results in self.results.values():
-                if results['equity_curve'] and len(results['equity_curve']) > 30:
-                    start_date = results['equity_curve'][30]['date']
-                    break
+        fig, axes = plt.subplots(1, 2, figsize=(15, 5))
 
-        if start_date is None:
-            print("Warning: Not enough data to plot normalized equity curves")
-            return
+        # Only plot GK, SABR, and GK_IVFilter
+        plot_models = ['GK', 'SABR', 'GK_IVFilter']
 
-        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-
-        # Prepare normalized equity curves
-        normalized_data = {}
-        for model_name, results in self.results.items():
-            if results['equity_curve']:
-                df = pd.DataFrame(results['equity_curve'])
-                # Filter to start from the normalization date
-                df_filtered = df[df['date'] >= start_date].copy()
-                if not df_filtered.empty:
-                    # Normalize to start at 10M
-                    initial_equity = df_filtered.iloc[0]['equity']
-                    df_filtered['normalized_equity'] = (df_filtered['equity'] / initial_equity) * Config.INITIAL_CAPITAL
-                    normalized_data[model_name] = df_filtered
-
-        # Plot normalized equity curves
+        # Equity curves
         ax = axes[0]
-        for model_name, df in normalized_data.items():
-            ax.plot(df['date'], df['normalized_equity'] / 1e6, label=model_name, linewidth=2)
-
-        ax.set_title('Equity Curves (Normalized from Steady State)', fontsize=14, fontweight='bold')
+        for model in plot_models:
+            equity_curve = self.results.get(model)
+            if equity_curve:
+                df = pd.DataFrame(equity_curve)
+                ax.plot(df['date'], df['equity'], label=model)
+        ax.set_title('Equity Curves')
         ax.set_xlabel('Date')
-        ax.set_ylabel('Portfolio Value ($M)')
+        ax.set_ylabel('Portfolio Value')
         ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.axhline(y=10, color='gray', linestyle=':', alpha=0.5, label='Initial Capital')
+        ax.grid(True)
 
-        # Plot drawdowns (recalculated from normalized equity)
+        # Drawdown
         ax = axes[1]
-        for model_name, df in normalized_data.items():
-            # Recalculate drawdown from normalized equity
-            running_max = df['normalized_equity'].expanding().max()
-            drawdown = (df['normalized_equity'] - running_max) / running_max
-            ax.fill_between(df['date'], 0, drawdown * 100,
-                           label=model_name, alpha=0.5)
-
-        ax.set_title('Drawdowns (from Steady State)', fontsize=14, fontweight='bold')
+        for model in plot_models:
+            equity_curve = self.results.get(model)
+            if equity_curve:
+                df = pd.DataFrame(equity_curve)
+                dd = (df['equity'] / df['equity'].expanding().max() - 1) * 100
+                ax.plot(df['date'], dd, label=model)
+        ax.set_title('Drawdown')
         ax.set_xlabel('Date')
         ax.set_ylabel('Drawdown (%)')
         ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim(-15, 1)
-
-        # Add max drawdown line
-        ax.axhline(y=-10, color='r', linestyle='--', alpha=0.5, label='10% Max DD')
-
-        # Add text annotation about normalization
-        fig.text(0.5, 0.02, f'Note: Performance normalized from {start_date.strftime("%Y-%m-%d")} when all strategies reached steady state',
-                ha='center', fontsize=10, style='italic')
+        ax.grid(True)
 
         plt.tight_layout()
-        plt.savefig(Config.RESULTS_DIR / 'backtest_results.png', dpi=100, bbox_inches='tight')
+        plt.savefig(Config.RESULTS_DIR / 'backtest_results.png')
         plt.show()
-
-    def analyze_regimes(self):
-        """Analyze performance in different volatility regimes"""
-        for model_name, results in self.results.items():
-            if not results['equity_curve'] or not results['vol_regimes']:
-                continue
-
-            print(f"\n{model_name} - Volatility Regime Analysis:")
-
-            # Merge equity and regime data
-            equity_df = pd.DataFrame(results['equity_curve'])
-            regime_df = pd.DataFrame(results['vol_regimes'])
-
-            merged = pd.merge(equity_df, regime_df, on='date', how='inner')
-            merged['returns'] = merged['equity'].pct_change()
-
-            # Calculate metrics by regime
-            for regime in ['low', 'normal', 'high']:
-                regime_data = merged[merged['regime'] == regime]
-                if len(regime_data) > 1:
-                    avg_return = regime_data['returns'].mean() * 252 * 100
-                    vol = regime_data['returns'].std() * np.sqrt(252) * 100
-                    sharpe = avg_return / vol if vol > 0 else 0
-
-                    print(f"  {regime.capitalize()} Vol: "
-                          f"Return={avg_return:.1f}%, "
-                          f"Vol={vol:.1f}%, "
-                          f"Sharpe={sharpe:.2f}")
 
 
 # ==================== Main Execution ====================
 def main():
     """Main execution function"""
     print("=" * 80)
-    print("FX OPTIONS TRADING SYSTEM - REFACTORED")
+    print("FX OPTIONS TRADING SYSTEM")
     print("=" * 80)
 
     # Create directories
     Config.DATA_DIR.mkdir(exist_ok=True)
     Config.RESULTS_DIR.mkdir(exist_ok=True)
 
-    # Load data
+    # Load FX data
     print("\nLoading FX data...")
     fx_data = DataLoader.load_fx_data(Config.FX_DATA_PATH)
     print(f"Loaded {len(fx_data)} days of data")
     print(f"Date range: {fx_data.index[0]} to {fx_data.index[-1]}")
 
-    # Use 75/25 train/test split
+    # Load discount curves
+    print("\nLoading discount curves...")
+    curves_data = DataLoader.load_curves_data(Config.CURVES_PATH)
+    if curves_data is not None:
+        print(f"Loaded {len(curves_data)} curve points")
+        print(f"Tenors available: {sorted(curves_data['tenor'].unique())}")
+    else:
+        print("Warning: Using default rates instead of curves")
+
+    # Split data
     n_days = len(fx_data)
-    split_idx = int(n_days * 0.75)
+    train_end = int(n_days * 0.85)
 
-    train_end_date = fx_data.index[split_idx]
-    test_start_date = fx_data.index[split_idx + 1]
-    test_end_date = fx_data.index[-1]
+    train_data = fx_data.iloc[:train_end]
+    test_data = fx_data.iloc[train_end:]
 
-    print(f"\nIn-sample period: {fx_data.index[0]} to {train_end_date}")
-    print(f"Out-of-sample period: {test_start_date} to {test_end_date}")
+    print(f"\nTrain period: {train_data.index[0]} to {train_data.index[-1]}")
+    print(f"Test period: {test_data.index[0]} to {test_data.index[-1]}")
 
-    # Run backtest on out-of-sample data
-    print("\n" + "=" * 80)
-    print("RUNNING OUT-OF-SAMPLE BACKTEST")
-    print("=" * 80)
+    # Run backtests with curves data
+    backtester = Backtester(fx_data, curves_data)
+    backtester.run_all_models(test_data.index[0], test_data.index[-1])
 
-    backtester = Backtester(fx_data)
-    backtester.run_backtest(test_start_date, test_end_date)
-
-    # Calculate metrics
+    # Calculate and display metrics
     print("\n" + "=" * 80)
     print("PERFORMANCE METRICS")
     print("=" * 80)
-    metrics = backtester.calculate_metrics()
+    metrics = backtester.calculate_performance_metrics()
     print(metrics.to_string(index=False))
 
     # Save results
     metrics.to_csv(Config.RESULTS_DIR / 'performance_metrics.csv', index=False)
 
-    # Analyze by volatility regime
-    print("\n" + "=" * 80)
-    print("VOLATILITY REGIME ANALYSIS")
-    print("=" * 80)
-    backtester.analyze_regimes()
-
     # Plot results
     print("\nGenerating plots...")
     backtester.plot_results()
 
-    # Export detailed results
-    for model_name, results in backtester.results.items():
-        # Save equity curve
-        equity_df = pd.DataFrame(results['equity_curve'])
-        equity_df.to_csv(Config.RESULTS_DIR / f'{model_name}_equity.csv', index=False)
-
-        # Save trades
-        if results['trades']:
-            trades_df = pd.DataFrame(results['trades'])
-            trades_df.to_csv(Config.RESULTS_DIR / f'{model_name}_trades.csv', index=False)
-
-    print(f"\n✅ Analysis complete! Results saved to {Config.RESULTS_DIR}")
+    print("\n✅ Analysis complete!")
+    print(f"Results saved to {Config.RESULTS_DIR}")
 
 
 if __name__ == "__main__":
