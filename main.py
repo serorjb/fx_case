@@ -99,23 +99,42 @@ class TradingBook:
     total_transaction_costs: float = 0.0
 
     def get_net_delta(self, pair: str = None) -> float:
-        """Calculate total portfolio delta"""
+        """Calculate total portfolio delta in dollar terms"""
         if pair:
-            option_delta = sum(pos.current_delta * pos.position_size
+            # Delta for specific pair
+            option_delta = sum(pos.current_delta * abs(pos.position_size) * pos.entry_spot *
+                             (1 if pos.position_size > 0 else -1)
                              for pos in self.options if pos.pair == pair)
-            return option_delta + self.spot_hedge.get(pair, 0)
+            spot_delta = self.spot_hedge.get(pair, 0) * self._get_current_spot(pair)
+            return option_delta + spot_delta
         else:
-            option_delta = sum(pos.current_delta * pos.position_size for pos in self.options)
-            total_spot = sum(self.spot_hedge.values())
-            return option_delta + total_spot
+            # Total portfolio delta
+            option_delta = sum(pos.current_delta * abs(pos.position_size) * pos.entry_spot *
+                             (1 if pos.position_size > 0 else -1)
+                             for pos in self.options)
+            # For spot hedges, need current spot prices (simplified - using entry spot)
+            spot_delta = sum(amount * self._get_current_spot(pair)
+                           for pair, amount in self.spot_hedge.items())
+            return option_delta + spot_delta
 
     def get_net_vega(self) -> float:
-        """Calculate total portfolio vega"""
-        return sum(pos.current_vega * pos.position_size for pos in self.options)
+        """Calculate total portfolio vega in dollar terms"""
+        return sum(pos.current_vega * abs(pos.position_size) * pos.entry_spot *
+                  (1 if pos.position_size > 0 else -1)
+                  for pos in self.options)
 
     def get_num_positions(self) -> int:
         """Count active positions"""
         return len(self.options)
+
+    def _get_current_spot(self, pair: str) -> float:
+        """Get current spot price for a pair (simplified - returns last known)"""
+        # In practice, would get from current market data
+        # For now, use average of entry spots
+        pair_positions = [pos for pos in self.options if pos.pair == pair]
+        if pair_positions:
+            return pair_positions[-1].entry_spot
+        return 100.0  # Default
 
 @dataclass
 class MarketData:
@@ -236,34 +255,168 @@ class GVVModel:
         return BlackScholes.price(S, K, T, r_d, r_f, smile_vol, option_type)
 
 class SABRModel:
-    """Simplified SABR model"""
+    """SABR model with proper calibration from training data"""
 
     def __init__(self):
-        self.alpha = None
-        self.beta = 0.5  # Fixed for FX
-        self.rho = -0.3
-        self.nu = 0.3
+        self.calibrated_params = {}  # Store calibrated parameters per pair and tenor
+        self.is_calibrated = False
 
-    def calibrate(self, strikes: np.ndarray, vols: np.ndarray, F: float, T: float):
-        """Simple calibration - just set alpha to ATM vol"""
-        atm_idx = np.argmin(np.abs(strikes - F))
-        self.alpha = vols[atm_idx]
+    def calibrate_from_training_data(self, fx_data: pd.DataFrame):
+        """Calibrate SABR parameters from historical volatility surfaces"""
+        from scipy.optimize import minimize
+
+        print("Calibrating SABR model...")
+
+        for pair in Config.PAIRS:
+            self.calibrated_params[pair] = {}
+            spot_col = f'{pair} Curncy'
+
+            if spot_col not in fx_data.columns:
+                continue
+
+            print(f"  Calibrating {pair}...")
+
+            for tenor in ['1M', '3M', '6M', '1Y']:
+                T = {'1M': 1/12, '3M': 0.25, '6M': 0.5, '1Y': 1.0}[tenor]
+
+                # Collect historical smile data
+                atm_col = f'{pair}V{tenor} Curncy'
+                rr_col = f'{pair}25R{tenor} Curncy'
+                bf_col = f'{pair}25B{tenor} Curncy'
+
+                if atm_col not in fx_data.columns:
+                    continue
+
+                # Get average parameters over training period
+                atm_vols = []
+                rr_values = []
+                bf_values = []
+
+                for date in fx_data.index[-252:]:  # Last year of training data
+                    if pd.notna(fx_data.loc[date, atm_col]):
+                        atm_vols.append(fx_data.loc[date, atm_col] / 100)
+
+                        if rr_col in fx_data.columns:
+                            rr_values.append(fx_data.loc[date, rr_col] / 100)
+                        else:
+                            rr_values.append(0)
+
+                        if bf_col in fx_data.columns:
+                            bf_values.append(fx_data.loc[date, bf_col] / 100)
+                        else:
+                            bf_values.append(0)
+
+                if len(atm_vols) < 20:
+                    continue
+
+                # Average parameters
+                avg_atm = np.mean(atm_vols)
+                avg_rr = np.mean(rr_values)
+                avg_bf = np.mean(bf_values)
+
+                # Estimate SABR parameters
+                # Alpha: ATM vol level
+                alpha = avg_atm
+
+                # Beta: fixed for FX
+                beta = 0.5
+
+                # Rho: correlation, estimated from skew
+                # Negative RR typically means negative rho
+                rho = np.clip(-avg_rr * 10, -0.9, 0.9)
+
+                # Nu: vol of vol, estimated from butterfly and historical vol of vol
+                vol_of_vol = np.std(atm_vols) * np.sqrt(252)
+                nu = np.clip(vol_of_vol, 0.1, 1.0)
+
+                self.calibrated_params[pair][tenor] = {
+                    'alpha': alpha,
+                    'beta': beta,
+                    'rho': rho,
+                    'nu': nu,
+                    'avg_atm': avg_atm,
+                    'avg_rr': avg_rr,
+                    'avg_bf': avg_bf
+                }
+
+                print(f"    {tenor}: α={alpha:.4f}, β={beta:.2f}, ρ={rho:.3f}, ν={nu:.3f}")
+
+        self.is_calibrated = len(self.calibrated_params) > 0
+        print(f"  SABR calibration complete for {list(self.calibrated_params.keys())}")
+
+    def calculate_sabr_vol(self, S: float, K: float, T: float, params: Dict) -> float:
+        """Calculate SABR implied volatility using calibrated parameters"""
+        if not params:
+            return 0.1
+
+        alpha = params['alpha']
+        beta = params['beta']
+        rho = params['rho']
+        nu = params['nu']
+
+        # Forward (simplified - assuming r_d = r_f)
+        F = S
+
+        if abs(F - K) < 0.001 * F:
+            # ATM case
+            sabr_vol = alpha * (1 + (nu**2 / 24) * T)
+        else:
+            # Hagan approximation
+            try:
+                z = (nu/alpha) * (F*K)**((1-beta)/2) * np.log(F/K)
+                x_arg = np.sqrt(1 - 2*rho*z + z**2) + z - rho
+
+                if x_arg <= 0:
+                    # Fallback to ATM vol
+                    sabr_vol = alpha
+                else:
+                    x = np.log(x_arg / (1 - rho))
+
+                    # First factor
+                    factor1 = alpha / ((F*K)**((1-beta)/2) *
+                                      (1 + (1-beta)**2/24 * (np.log(F/K))**2 +
+                                       (1-beta)**4/1920 * (np.log(F/K))**4))
+
+                    # Second factor
+                    if abs(x) > 0.001:
+                        factor2 = z / x
+                    else:
+                        factor2 = 1.0
+
+                    # Third factor (correction terms)
+                    factor3 = 1 + ((1-beta)**2/24 * alpha**2 / ((F*K)**(1-beta)) +
+                                  rho*beta*nu*alpha / (4*(F*K)**((1-beta)/2)) +
+                                  (2-3*rho**2)*nu**2/24) * T
+
+                    sabr_vol = factor1 * factor2 * factor3
+            except:
+                # Fallback to ATM vol
+                sabr_vol = alpha
+
+        # Ensure positive and reasonable
+        return np.clip(sabr_vol, 0.001, 2.0)
 
     def price(self, S: float, K: float, T: float, r_d: float, r_f: float,
-              atm_vol: float, option_type: str) -> float:
-        """Price using SABR vol"""
-        if self.alpha is None:
-            self.alpha = atm_vol
+              pair: str, tenor: str, option_type: str) -> float:
+        """Price using SABR vol with calibrated parameters"""
+        if not self.is_calibrated or pair not in self.calibrated_params:
+            # Fallback to Black-Scholes with default vol
+            return BlackScholes.price(S, K, T, r_d, r_f, 0.1, option_type)
 
-        # Simplified SABR vol (Hagan approximation)
-        F = S * np.exp((r_d - r_f) * T)
-        if abs(F - K) < 0.001:
-            sabr_vol = self.alpha
-        else:
-            z = (self.nu/self.alpha) * (F*K)**((1-self.beta)/2) * np.log(F/K)
-            x = np.log((np.sqrt(1 - 2*self.rho*z + z**2) + z - self.rho)/(1 - self.rho))
-            sabr_vol = self.alpha * (z/x if abs(x) > 0.001 else 1.0)
+        # Get appropriate calibrated parameters
+        if tenor not in self.calibrated_params[pair]:
+            # Use nearest available tenor
+            available_tenors = list(self.calibrated_params[pair].keys())
+            if not available_tenors:
+                return BlackScholes.price(S, K, T, r_d, r_f, 0.1, option_type)
+            tenor = available_tenors[0]
 
+        params = self.calibrated_params[pair][tenor]
+
+        # Calculate SABR vol
+        sabr_vol = self.calculate_sabr_vol(S, K, T, params)
+
+        # Price with SABR vol
         return BlackScholes.price(S, K, T, r_d, r_f, sabr_vol, option_type)
 
 # ==================== ML Model ====================
@@ -272,65 +425,307 @@ class LGBMPricer:
 
     def __init__(self, training_years: int = 5):
         self.training_years = training_years
-        self.model = None
-        self.last_train_date = None
+        self.models = {}  # One model per pair
+        self.scalers = {}  # Feature scalers per pair
+        self.feature_columns = None
+        self.is_trained = False
+
+    def prepare_training_features(self, fx_data: pd.DataFrame, pair: str) -> pd.DataFrame:
+        """Prepare features from historical data for training"""
+        features = pd.DataFrame(index=fx_data.index)
+
+        # Get pair-specific columns
+        spot_col = f'{pair} Curncy'
+        if spot_col not in fx_data.columns:
+            return features
+
+        # Basic price features
+        features['spot'] = fx_data[spot_col]
+        features['log_spot'] = np.log(features['spot'])
+        features['spot_return_1d'] = features['spot'].pct_change(1)
+        features['spot_return_5d'] = features['spot'].pct_change(5)
+        features['spot_return_20d'] = features['spot'].pct_change(20)
+
+        # Realized volatility
+        log_returns = np.log(features['spot'] / features['spot'].shift(1))
+        for window in [5, 10, 20, 60]:
+            features[f'realized_vol_{window}d'] = log_returns.rolling(window).std() * np.sqrt(252)
+
+        # For each tenor, add vol features
+        for tenor in ['1M', '3M', '6M', '1Y']:
+            vol_col = f'{pair}V{tenor} Curncy'
+            if vol_col in fx_data.columns:
+                features[f'iv_{tenor}'] = fx_data[vol_col] / 100
+                features[f'iv_{tenor}_ma20'] = features[f'iv_{tenor}'].rolling(20).mean()
+                features[f'iv_{tenor}_std20'] = features[f'iv_{tenor}'].rolling(20).std()
+
+            # Risk reversal and butterfly
+            rr_col = f'{pair}25R{tenor} Curncy'
+            if rr_col in fx_data.columns:
+                features[f'rr25_{tenor}'] = fx_data[rr_col] / 100
+
+            bf_col = f'{pair}25B{tenor} Curncy'
+            if bf_col in fx_data.columns:
+                features[f'bf25_{tenor}'] = fx_data[bf_col] / 100
+
+        # IV term structure
+        if f'iv_1M' in features.columns and f'iv_1Y' in features.columns:
+            features['term_structure'] = features['iv_1Y'] - features['iv_1M']
+
+        # IV vs RV
+        if f'iv_1M' in features.columns and 'realized_vol_20d' in features.columns:
+            features['iv_rv_premium'] = features['iv_1M'] - features['realized_vol_20d']
+
+        return features.dropna()
+
+    def create_training_samples(self, fx_data: pd.DataFrame, features: pd.DataFrame,
+                               pair: str) -> Tuple[pd.DataFrame, pd.Series]:
+        """Create training samples with different strikes and tenors"""
+        X_list = []
+        y_list = []
+
+        spot_col = f'{pair} Curncy'
+
+        for date in features.index[60:]:  # Need history for features
+            if date not in fx_data.index:
+                continue
+
+            spot = fx_data.loc[date, spot_col]
+
+            # Sample different strikes and tenors
+            for tenor, T in [('1M', 1/12), ('3M', 0.25), ('6M', 0.5)]:
+                vol_col = f'{pair}V{tenor} Curncy'
+                if vol_col not in fx_data.columns:
+                    continue
+
+                atm_vol = fx_data.loc[date, vol_col] / 100
+                if pd.isna(atm_vol) or atm_vol <= 0:
+                    continue
+
+                # Get smile parameters
+                rr_col = f'{pair}25R{tenor} Curncy'
+                bf_col = f'{pair}25B{tenor} Curncy'
+                rr_25 = fx_data.loc[date, rr_col] / 100 if rr_col in fx_data.columns else 0
+                bf_25 = fx_data.loc[date, bf_col] / 100 if bf_col in fx_data.columns else 0
+
+                # Sample strikes around ATM
+                for moneyness in [0.90, 0.95, 0.98, 1.0, 1.02, 1.05, 1.10]:
+                    K = spot * moneyness
+
+                    # Features for this sample
+                    sample_features = features.loc[date].copy()
+                    sample_features['moneyness'] = moneyness
+                    sample_features['time_to_maturity'] = T
+                    sample_features['strike'] = K
+
+                    # Calculate "true" price using GVV model (our target)
+                    # This uses smile information
+                    smile_vol = atm_vol
+                    if moneyness < 0.97:
+                        smile_vol = atm_vol + bf_25 - rr_25/2
+                    elif moneyness > 1.03:
+                        smile_vol = atm_vol + bf_25 + rr_25/2
+                    else:
+                        skew = rr_25 * (moneyness - 1.0) * 4
+                        smile_vol = atm_vol + bf_25 + skew
+
+                    # Simple rates assumption
+                    r_d = 0.05
+                    r_f = 0.01
+
+                    # Black-Scholes price with smile vol
+                    option_price = BlackScholes.price(spot, K, T, r_d, r_f, smile_vol, 'call')
+
+                    X_list.append(sample_features)
+                    y_list.append(option_price / spot)  # Normalize by spot
+
+        if len(X_list) == 0:
+            return pd.DataFrame(), pd.Series()
+
+        X = pd.DataFrame(X_list)
+        y = pd.Series(y_list)
+
+        return X, y
+
+    def train(self, fx_data: pd.DataFrame):
+        """Train the model on historical data"""
+        try:
+            import lightgbm as lgb
+            from sklearn.model_selection import train_test_split
+            from sklearn.preprocessing import StandardScaler
+
+            print("Training LightGBM models...")
+
+            for pair in Config.PAIRS:
+                print(f"  Training model for {pair}...")
+
+                # Prepare features
+                features = self.prepare_training_features(fx_data, pair)
+                if len(features) < 100:
+                    print(f"    Insufficient data for {pair}")
+                    continue
+
+                # Create training samples
+                X, y = self.create_training_samples(fx_data, features, pair)
+                if len(X) < 100:
+                    print(f"    Insufficient samples for {pair}")
+                    continue
+
+                # Remove any remaining NaN
+                mask = ~(X.isna().any(axis=1) | y.isna())
+                X = X[mask]
+                y = y[mask]
+
+                if len(X) < 100:
+                    continue
+
+                # Split for validation
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X, y, test_size=0.2, random_state=42, shuffle=False
+                )
+
+                # Scale features
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                X_val_scaled = scaler.transform(X_val)
+
+                # Store feature columns
+                if self.feature_columns is None:
+                    self.feature_columns = X.columns.tolist()
+
+                # Train model
+                lgb_train = lgb.Dataset(X_train_scaled, y_train)
+                lgb_val = lgb.Dataset(X_val_scaled, y_val, reference=lgb_train)
+
+                params = {
+                    'objective': 'regression',
+                    'metric': 'rmse',
+                    'boosting_type': 'gbdt',
+                    'num_leaves': 31,
+                    'learning_rate': 0.05,
+                    'feature_fraction': 0.8,
+                    'bagging_fraction': 0.7,
+                    'bagging_freq': 5,
+                    'verbose': -1,
+                    'num_threads': 4
+                }
+
+                model = lgb.train(
+                    params,
+                    lgb_train,
+                    valid_sets=[lgb_val],
+                    num_boost_round=500,
+                    callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)]
+                )
+
+                self.models[pair] = model
+                self.scalers[pair] = scaler
+
+                # Calculate validation metrics
+                y_pred = model.predict(X_val_scaled, num_iteration=model.best_iteration)
+                rmse = np.sqrt(np.mean((y_pred - y_val)**2))
+                print(f"    Validation RMSE: {rmse:.6f}")
+
+            self.is_trained = len(self.models) > 0
+            print(f"  Training complete. Models trained for {list(self.models.keys())}")
+
+        except ImportError:
+            print("Warning: LightGBM not installed. Using fallback pricing.")
+            self.is_trained = False
 
     def prepare_features(self, market_data: MarketData, pair: str,
                          strike: float, tenor: str, option_type: str,
                          historical_data: pd.DataFrame = None) -> np.ndarray:
-        """Prepare features for ML model"""
+        """Prepare features for prediction - matching training features"""
+        if not self.is_trained or pair not in self.models:
+            return np.array([])
+
+        features = {}
         spot = market_data.spot[pair]
         T = self._tenor_to_years(tenor)
 
-        # Basic features
-        features = [
-            T,  # Time to maturity
-            strike / spot,  # Moneyness
-            market_data.rates.get('USD', 0.05),  # Domestic rate
-            market_data.rates.get('JPY', 0.01),  # Foreign rate
-            market_data.atm_vols[pair].get(tenor, 0.1),  # ATM vol
-            market_data.rr_25[pair].get(tenor, 0),  # Risk reversal
-            market_data.bf_25[pair].get(tenor, 0),  # Butterfly
-        ]
+        # Match the features used in training
+        features['spot'] = spot
+        features['log_spot'] = np.log(spot)
 
-        # Add historical vol if available
+        # Use historical data for price features
         if historical_data is not None and len(historical_data) > 20:
-            returns = np.log(historical_data['spot'] / historical_data['spot'].shift(1))
-            realized_vol = returns.tail(20).std() * np.sqrt(252)
-            features.append(realized_vol)
+            features['spot_return_1d'] = (spot / historical_data['spot'].iloc[-2] - 1) if len(historical_data) > 1 else 0
+            features['spot_return_5d'] = (spot / historical_data['spot'].iloc[-6] - 1) if len(historical_data) > 5 else 0
+            features['spot_return_20d'] = (spot / historical_data['spot'].iloc[-21] - 1) if len(historical_data) > 20 else 0
+
+            # Realized vol
+            log_returns = np.log(historical_data['spot'] / historical_data['spot'].shift(1))
+            for window in [5, 10, 20, 60]:
+                if len(log_returns) > window:
+                    features[f'realized_vol_{window}d'] = log_returns.tail(window).std() * np.sqrt(252)
+                else:
+                    features[f'realized_vol_{window}d'] = 0.1
         else:
-            features.append(0.1)  # Default RV
+            # Default values
+            features['spot_return_1d'] = 0
+            features['spot_return_5d'] = 0
+            features['spot_return_20d'] = 0
+            for window in [5, 10, 20, 60]:
+                features[f'realized_vol_{window}d'] = 0.1
 
-        # Add other model prices as features (would be calculated separately)
-        features.extend([0.0, 0.0, 0.0])  # Placeholder for GK, GVV, SABR prices
+        # Current IV features
+        for t in ['1M', '3M', '6M', '1Y']:
+            if t in market_data.atm_vols[pair]:
+                features[f'iv_{t}'] = market_data.atm_vols[pair][t]
+                features[f'iv_{t}_ma20'] = features[f'iv_{t}']  # Simplified
+                features[f'iv_{t}_std20'] = 0.01  # Simplified
+            else:
+                features[f'iv_{t}'] = 0.1
+                features[f'iv_{t}_ma20'] = 0.1
+                features[f'iv_{t}_std20'] = 0.01
 
-        return np.array(features).reshape(1, -1)
+            if t in market_data.rr_25[pair]:
+                features[f'rr25_{t}'] = market_data.rr_25[pair][t]
+            else:
+                features[f'rr25_{t}'] = 0
 
-    def train(self, training_data: pd.DataFrame):
-        """Train the model on historical data"""
-        # Simplified - would implement full training logic
-        try:
-            import lightgbm as lgb
+            if t in market_data.bf_25[pair]:
+                features[f'bf25_{t}'] = market_data.bf_25[pair][t]
+            else:
+                features[f'bf25_{t}'] = 0
 
-            # Prepare training data
-            X = training_data[['moneyness', 'time_to_maturity', 'atm_vol', 'rr', 'bf']].values
-            y = training_data['option_price'].values
+        # Term structure
+        features['term_structure'] = features['iv_1Y'] - features['iv_1M']
 
-            # Train model
-            self.model = lgb.LGBMRegressor(n_estimators=100, learning_rate=0.05)
-            self.model.fit(X, y)
-        except ImportError:
-            print("Warning: LightGBM not installed. Using fallback pricing.")
-            self.model = None
+        # IV vs RV
+        features['iv_rv_premium'] = features['iv_1M'] - features['realized_vol_20d']
+
+        # Strike features
+        features['moneyness'] = strike / spot
+        features['time_to_maturity'] = T
+        features['strike'] = strike
+
+        # Create feature vector in correct order
+        feature_vector = []
+        for col in self.feature_columns:
+            feature_vector.append(features.get(col, 0))
+
+        return np.array(feature_vector).reshape(1, -1)
 
     def price(self, S: float, K: float, T: float, r_d: float, r_f: float,
-              features: np.ndarray) -> float:
+              features: np.ndarray, pair: str = None) -> float:
         """Price option using trained model"""
-        if self.model is None:
-            # Fallback to Black-Scholes if not trained
+        if not self.is_trained or len(features) == 0 or pair not in self.models:
+            # Fallback to Black-Scholes
             return BlackScholes.price(S, K, T, r_d, r_f, 0.1, 'call')
 
-        return self.model.predict(features)[0]
+        # Scale features
+        features_scaled = self.scalers[pair].transform(features)
+
+        # Predict normalized price
+        normalized_price = self.models[pair].predict(
+            features_scaled,
+            num_iteration=self.models[pair].best_iteration
+        )[0]
+
+        # Denormalize
+        return normalized_price * S
 
     def _tenor_to_years(self, tenor: str) -> float:
         """Convert tenor to years"""
@@ -580,20 +975,15 @@ class OptionsArbitrageStrategy:
             return GVVModel.price(S, K, T, r_d, r_f, atm_vol, rr_25, bf_25, option_type)
 
         elif self.model_name == 'SABR':
-            atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
-            # Calibrate SABR if needed
-            if self.sabr_model.alpha is None:
-                strikes = np.array([S*0.9, S, S*1.1])
-                vols = np.array([atm_vol*1.1, atm_vol, atm_vol*1.1])
-                self.sabr_model.calibrate(strikes, vols, S, T)
-            return self.sabr_model.price(S, K, T, r_d, r_f, atm_vol, option_type)
+            # Use properly calibrated SABR model
+            return self.sabr_model.price(S, K, T, r_d, r_f, pair, tenor, option_type)
 
         elif self.model_name == 'LGBM':
             features = self.lgbm_model.prepare_features(
                 market_data, pair, K, tenor, option_type,
                 historical_data.get(pair)
             )
-            return self.lgbm_model.price(S, K, T, r_d, r_f, features)
+            return self.lgbm_model.price(S, K, T, r_d, r_f, features, pair)
 
         else:  # GK/Black-Scholes
             atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
@@ -632,26 +1022,34 @@ class OptionsArbitrageStrategy:
                 signal['vol'], signal['option_type'], signal['tenor'], is_buy
             )
 
-            # Calculate notional and total transaction costs
-            notional = signal['spot'] * abs(signal['direction'])
+            # Calculate notional - this should be a reasonable size per trade
+            # Use a fraction of capital based on position limits
+            max_position_value = Config.INITIAL_CAPITAL * 0.02  # 2% per position
+            notional = min(max_position_value, Config.INITIAL_CAPITAL * 0.01)  # Start with 1% of capital
+
+            # Number of contracts (each contract is for notional/spot units of currency)
+            num_contracts = notional / signal['spot']
+
+            # Total premium for the options
+            total_option_premium = trade_price * notional
 
             # Add brokerage and clearing costs
             brokerage_cost = notional * Config.TRANSACTION_COSTS['brokerage']
             clearing_cost = notional * Config.TRANSACTION_COSTS['clearing']
             total_transaction_cost = vol_cost * notional + brokerage_cost + clearing_cost
 
-            # Total premium including all costs
+            # Total cost including all fees
             if is_buy:
-                total_premium = trade_price * notional + total_transaction_cost
+                total_cost = total_option_premium + total_transaction_cost
             else:
-                total_premium = trade_price * notional - total_transaction_cost
+                total_cost = total_transaction_cost  # For selling, we receive premium
 
             # Check margin/capital
             if signal['direction'] > 0:  # Buying
-                if self.book.cash < total_premium:
+                if self.book.cash < total_cost:
                     continue  # Not enough cash
             else:  # Selling (need margin)
-                required_margin = total_premium * 0.2  # 20% margin for short
+                required_margin = total_option_premium * 0.2  # 20% margin for short
                 if self.book.used_margin + required_margin > Config.INITIAL_CAPITAL * Config.MAX_LEVERAGE:
                     continue  # Exceeds leverage limit
 
@@ -664,7 +1062,7 @@ class OptionsArbitrageStrategy:
                 pair=signal['pair'],
                 strike=signal['strike'],
                 option_type=signal['option_type'],
-                position_size=signal['direction'],
+                position_size=signal['direction'] * num_contracts,  # Signed number of contracts
                 entry_price=trade_price,
                 entry_spot=signal['spot'],
                 entry_vol=signal['vol'],
@@ -688,10 +1086,10 @@ class OptionsArbitrageStrategy:
 
             # Update cash/margin
             if signal['direction'] > 0:
-                self.book.cash -= total_premium
+                self.book.cash -= total_cost
             else:
-                self.book.cash += trade_price * notional - total_transaction_cost
-                self.book.used_margin += total_premium * 0.2
+                self.book.cash += total_option_premium - total_transaction_cost
+                self.book.used_margin += required_margin
 
             # Log trade
             self.trades_log.append({
@@ -700,7 +1098,9 @@ class OptionsArbitrageStrategy:
                 'strike': signal['strike'],
                 'option_type': signal['option_type'],
                 'direction': signal['direction'],
-                'premium': trade_price * notional,
+                'notional': notional,
+                'num_contracts': num_contracts,
+                'premium': total_option_premium,
                 'transaction_costs': total_transaction_cost,
                 'mispricing': signal['mispricing']
             })
@@ -712,17 +1112,21 @@ class OptionsArbitrageStrategy:
                 continue
 
             net_delta = self.book.get_net_delta(pair)
+            spot_price = market_data.spot[pair]
 
-            if abs(net_delta) > Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL:
-                # Need to hedge
-                hedge_amount = -net_delta
-                spot_price = market_data.spot[pair]
+            # Check if delta exceeds limits (in dollar terms)
+            delta_limit = Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL
+
+            if abs(net_delta) > delta_limit:
+                # Need to hedge - calculate spot amount needed
+                # Delta hedge amount is in units of base currency
+                hedge_amount = -net_delta / spot_price
 
                 # Calculate transaction cost for spot hedge
                 spot_spread = Config.TRANSACTION_COSTS['spot'].get(pair, 0.0002)
-                hedge_cost = abs(hedge_amount) * spot_price * spot_spread
+                hedge_cost = abs(hedge_amount * spot_price) * spot_spread
 
-                # Update spot hedge position
+                # Update spot hedge position (in units of base currency)
                 if pair not in self.book.spot_hedge:
                     self.book.spot_hedge[pair] = 0
                 self.book.spot_hedge[pair] += hedge_amount
@@ -736,8 +1140,11 @@ class OptionsArbitrageStrategy:
                     'date': market_data.date,
                     'pair': pair,
                     'hedge_amount': hedge_amount,
+                    'hedge_delta': hedge_amount * spot_price,  # Dollar delta hedged
                     'spot_price': spot_price,
-                    'cost': hedge_cost
+                    'cost': hedge_cost,
+                    'net_delta_before': net_delta,
+                    'net_delta_after': self.book.get_net_delta(pair)
                 })
 
     def _update_positions(self, market_data: MarketData):
@@ -956,6 +1363,24 @@ class Backtester:
         self.fx_data = fx_data
         self.curves_data = curves_data
         self.results = {}
+        self.trained_lgbm = None
+        self.trained_sabr = None
+
+    def train_models(self, train_data: pd.DataFrame):
+        """Train ML and calibrate models using training data"""
+        print("\n" + "=" * 80)
+        print("TRAINING MODELS ON HISTORICAL DATA")
+        print("=" * 80)
+
+        # Train LightGBM
+        self.trained_lgbm = LGBMPricer()
+        self.trained_lgbm.train(train_data)
+
+        # Calibrate SABR
+        self.trained_sabr = SABRModel()
+        self.trained_sabr.calibrate_from_training_data(train_data)
+
+        print("\nModel training complete!")
 
     def run_all_models(self, start_date: pd.Timestamp, end_date: pd.Timestamp,
                       delta_model: str = None):
@@ -968,6 +1393,13 @@ class Backtester:
         for model in models:
             print(f"\nRunning backtest for {model} (Delta model: {delta_model})...")
             strategy = OptionsArbitrageStrategy(model_name=model, delta_model=delta_model)
+
+            # Inject trained models
+            if model == 'LGBM' and self.trained_lgbm is not None:
+                strategy.lgbm_model = self.trained_lgbm
+            elif model == 'SABR' and self.trained_sabr is not None:
+                strategy.sabr_model = self.trained_sabr
+
             self._run_single_backtest(strategy, start_date, end_date)
             self.results[f'{model}_delta{delta_model}'] = strategy.equity_curve
 
@@ -982,6 +1414,9 @@ class Backtester:
         print(f"\nRunning backtest for GK with IV filter (Delta model: SABR)...")
         strategy = OptionsArbitrageStrategy(model_name='GK', use_iv_filter=True,
                                            delta_model='SABR')
+        # Inject trained SABR for delta calculation
+        if self.trained_sabr is not None:
+            strategy.delta_sabr_model = self.trained_sabr
         self._run_single_backtest(strategy, start_date, end_date)
         self.results[f'GK_IVFilter_deltaSABR'] = strategy.equity_curve
 
@@ -1142,7 +1577,7 @@ def main():
 
     # Split data
     n_days = len(fx_data)
-    train_end = int(n_days * 0.85)
+    train_end = int(n_days * 0.8)
 
     train_data = fx_data.iloc[:train_end]
     test_data = fx_data.iloc[train_end:]
@@ -1165,9 +1600,17 @@ def main():
     print(f"\nBrokerage: {Config.TRANSACTION_COSTS['brokerage']*10000:.1f} bps")
     print(f"Clearing: {Config.TRANSACTION_COSTS['clearing']*10000:.1f} bps")
 
-    # Run backtests with curves data
+    # Initialize backtester
     print(f"\nUsing delta model: {Config.DELTA_MODEL}")
     backtester = Backtester(fx_data, curves_data)
+
+    # TRAIN MODELS USING TRAINING DATA
+    backtester.train_models(train_data)
+
+    # Run backtests on TEST data
+    print("\n" + "=" * 80)
+    print("RUNNING BACKTESTS ON TEST DATA")
+    print("=" * 80)
     backtester.run_all_models(test_data.index[0], test_data.index[-1],
                               delta_model=Config.DELTA_MODEL)
 
