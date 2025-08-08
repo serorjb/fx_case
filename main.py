@@ -11,9 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, field
 import warnings
-
 warnings.filterwarnings('ignore')
-
 
 # ==================== Configuration ====================
 class Config:
@@ -31,9 +29,31 @@ class Config:
     MAX_DELTA_EXPOSURE = 0.03  # 3% max delta at end of day
     MISPRICING_THRESHOLD = 0.02  # 2% mispricing to trade
 
-    # Transaction costs
-    SPOT_SPREAD = 0.0002  # 2 bps
-    OPTION_SPREAD = 0.0005  # 5 bps
+    # Realistic Transaction costs for FX Options
+    # Based on typical institutional spreads
+    TRANSACTION_COSTS = {
+        'spot': {
+            'USDJPY': 0.00002,  # 0.2 pips for majors
+            'GBPNZD': 0.00015,  # 1.5 pips for crosses
+            'USDCAD': 0.00003,  # 0.3 pips
+        },
+        'options': {
+            # Vol spreads by tenor (in vol points)
+            '1W': 0.005,   # 50 bps vol spread
+            '2W': 0.004,   # 40 bps
+            '3W': 0.004,   # 40 bps
+            '1M': 0.003,   # 30 bps
+            '2M': 0.0035,  # 35 bps
+            '3M': 0.004,   # 40 bps
+            '4M': 0.0045,  # 45 bps
+            '6M': 0.005,   # 50 bps
+            '9M': 0.006,   # 60 bps
+            '1Y': 0.007,   # 70 bps
+        },
+        # Additional costs
+        'brokerage': 0.00002,  # 0.2 bps of notional
+        'clearing': 0.00001,   # 0.1 bps of notional
+    }
 
     # Model parameters
     LGBM_TRAINING_YEARS = 5
@@ -48,7 +68,6 @@ class Config:
 
     # Currency pairs
     PAIRS = ['USDJPY', 'GBPNZD', 'USDCAD']
-
 
 # ==================== Data Structures ====================
 @dataclass
@@ -68,20 +87,27 @@ class OptionPosition:
     current_vega: float = 0.0
     current_value: float = 0.0
     pnl: float = 0.0
-
+    transaction_costs: float = 0.0
 
 @dataclass
 class TradingBook:
     """Manages all positions and hedges"""
     options: List[OptionPosition] = field(default_factory=list)
-    spot_hedge: float = 0.0  # Spot position for delta hedging
+    spot_hedge: Dict[str, float] = field(default_factory=dict)  # Spot position by pair
     cash: float = Config.INITIAL_CAPITAL
     used_margin: float = 0.0
+    total_transaction_costs: float = 0.0
 
-    def get_net_delta(self) -> float:
+    def get_net_delta(self, pair: str = None) -> float:
         """Calculate total portfolio delta"""
-        option_delta = sum(pos.current_delta * pos.position_size for pos in self.options)
-        return option_delta + self.spot_hedge
+        if pair:
+            option_delta = sum(pos.current_delta * pos.position_size
+                             for pos in self.options if pos.pair == pair)
+            return option_delta + self.spot_hedge.get(pair, 0)
+        else:
+            option_delta = sum(pos.current_delta * pos.position_size for pos in self.options)
+            total_spot = sum(self.spot_hedge.values())
+            return option_delta + total_spot
 
     def get_net_vega(self) -> float:
         """Calculate total portfolio vega"""
@@ -90,7 +116,6 @@ class TradingBook:
     def get_num_positions(self) -> int:
         """Count active positions"""
         return len(self.options)
-
 
 @dataclass
 class MarketData:
@@ -105,7 +130,6 @@ class MarketData:
     bf_10: Dict[str, Dict[str, float]]  # 10-delta butterflies
     rates: Dict[str, float]  # interest rates by currency
 
-
 # ==================== Pricing Models ====================
 class BlackScholes:
     """Black-Scholes pricing for FX options"""
@@ -119,13 +143,13 @@ class BlackScholes:
 
         from scipy.stats import norm
 
-        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
+        d1 = (np.log(S/K) + (r_d - r_f + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+        d2 = d1 - sigma*np.sqrt(T)
 
         if option_type == 'call':
-            return S * np.exp(-r_f * T) * norm.cdf(d1) - K * np.exp(-r_d * T) * norm.cdf(d2)
+            return S*np.exp(-r_f*T)*norm.cdf(d1) - K*np.exp(-r_d*T)*norm.cdf(d2)
         else:
-            return K * np.exp(-r_d * T) * norm.cdf(-d2) - S * np.exp(-r_f * T) * norm.cdf(-d1)
+            return K*np.exp(-r_d*T)*norm.cdf(-d2) - S*np.exp(-r_f*T)*norm.cdf(-d1)
 
     @staticmethod
     def delta(S: float, K: float, T: float, r_d: float, r_f: float,
@@ -136,12 +160,12 @@ class BlackScholes:
 
         from scipy.stats import norm
 
-        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d1 = (np.log(S/K) + (r_d - r_f + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
 
         if option_type == 'call':
-            return np.exp(-r_f * T) * norm.cdf(d1)
+            return np.exp(-r_f*T) * norm.cdf(d1)
         else:
-            return -np.exp(-r_f * T) * norm.cdf(-d1)
+            return -np.exp(-r_f*T) * norm.cdf(-d1)
 
     @staticmethod
     def vega(S: float, K: float, T: float, r_d: float, r_f: float, sigma: float) -> float:
@@ -151,28 +175,34 @@ class BlackScholes:
 
         from scipy.stats import norm
 
-        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        return S * np.exp(-r_f * T) * norm.pdf(d1) * np.sqrt(T) / 100  # Per 1% vol change
+        d1 = (np.log(S/K) + (r_d - r_f + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+        return S * np.exp(-r_f*T) * norm.pdf(d1) * np.sqrt(T) / 100  # Per 1% vol change
 
     @staticmethod
-    def implied_vol_from_delta(delta: float, T: float, r_f: float,
-                               option_type: str, spot_vol: float) -> float:
-        """Get implied vol for a given delta strike"""
-        # Simplified - in practice would use proper inversion
-        if option_type == 'call':
-            if delta > 0.5:  # ITM call
-                return spot_vol * (1 - 0.1 * (delta - 0.5))
-            else:  # OTM call
-                return spot_vol * (1 + 0.1 * (0.5 - delta))
-        else:  # put
-            if delta < -0.5:  # ITM put
-                return spot_vol * (1 - 0.1 * (abs(delta) - 0.5))
-            else:  # OTM put
-                return spot_vol * (1 + 0.1 * (0.5 - abs(delta)))
+    def price_with_vol_spread(S: float, K: float, T: float, r_d: float, r_f: float,
+                             sigma: float, option_type: str, tenor: str,
+                             is_buy: bool) -> Tuple[float, float]:
+        """Price option with bid-ask spread in volatility"""
+        vol_spread = Config.TRANSACTION_COSTS['options'].get(tenor, 0.005)
+
+        if is_buy:
+            # Pay offer vol (higher)
+            effective_vol = sigma + vol_spread / 2
+        else:
+            # Receive bid vol (lower)
+            effective_vol = sigma - vol_spread / 2
+
+        price = BlackScholes.price(S, K, T, r_d, r_f, effective_vol, option_type)
+
+        # Transaction cost is the difference from mid
+        mid_price = BlackScholes.price(S, K, T, r_d, r_f, sigma, option_type)
+        transaction_cost = abs(price - mid_price)
+
+        return price, transaction_cost
 
     @staticmethod
     def strike_from_delta(S: float, delta: float, T: float, r_d: float, r_f: float,
-                          sigma: float, option_type: str) -> float:
+                         sigma: float, option_type: str) -> float:
         """Calculate strike from delta"""
         from scipy.stats import norm
 
@@ -181,9 +211,8 @@ class BlackScholes:
         else:
             d1 = -norm.ppf(-delta * np.exp(r_f * T))
 
-        K = S * np.exp(-(d1 * sigma * np.sqrt(T) - (r_d - r_f + 0.5 * sigma ** 2) * T))
+        K = S * np.exp(-(d1 * sigma * np.sqrt(T) - (r_d - r_f + 0.5*sigma**2)*T))
         return K
-
 
 class GVVModel:
     """Simplified GVV model implementation"""
@@ -196,16 +225,15 @@ class GVVModel:
         moneyness = K / S
 
         if moneyness < 0.95:  # Deep OTM put / ITM call region
-            smile_vol = atm_vol + bf_25 - rr_25 / 2 + 0.002 * (0.95 - moneyness)
+            smile_vol = atm_vol + bf_25 - rr_25/2 + 0.002 * (0.95 - moneyness)
         elif moneyness > 1.05:  # Deep OTM call / ITM put region
-            smile_vol = atm_vol + bf_25 + rr_25 / 2 + 0.002 * (moneyness - 1.05)
+            smile_vol = atm_vol + bf_25 + rr_25/2 + 0.002 * (moneyness - 1.05)
         else:  # Near ATM
             skew_adjustment = rr_25 * (moneyness - 1.0) * 4  # Linear skew
             smile_vol = atm_vol + bf_25 + skew_adjustment
 
         # Price with adjusted vol
         return BlackScholes.price(S, K, T, r_d, r_f, smile_vol, option_type)
-
 
 class SABRModel:
     """Simplified SABR model"""
@@ -232,12 +260,11 @@ class SABRModel:
         if abs(F - K) < 0.001:
             sabr_vol = self.alpha
         else:
-            z = (self.nu / self.alpha) * (F * K) ** ((1 - self.beta) / 2) * np.log(F / K)
-            x = np.log((np.sqrt(1 - 2 * self.rho * z + z ** 2) + z - self.rho) / (1 - self.rho))
-            sabr_vol = self.alpha * (z / x if abs(x) > 0.001 else 1.0)
+            z = (self.nu/self.alpha) * (F*K)**((1-self.beta)/2) * np.log(F/K)
+            x = np.log((np.sqrt(1 - 2*self.rho*z + z**2) + z - self.rho)/(1 - self.rho))
+            sabr_vol = self.alpha * (z/x if abs(x) > 0.001 else 1.0)
 
         return BlackScholes.price(S, K, T, r_d, r_f, sabr_vol, option_type)
-
 
 # ==================== ML Model ====================
 class LGBMPricer:
@@ -282,15 +309,19 @@ class LGBMPricer:
     def train(self, training_data: pd.DataFrame):
         """Train the model on historical data"""
         # Simplified - would implement full training logic
-        import lightgbm as lgb
+        try:
+            import lightgbm as lgb
 
-        # Prepare training data
-        X = training_data[['moneyness', 'time_to_maturity', 'atm_vol', 'rr', 'bf']].values
-        y = training_data['option_price'].values
+            # Prepare training data
+            X = training_data[['moneyness', 'time_to_maturity', 'atm_vol', 'rr', 'bf']].values
+            y = training_data['option_price'].values
 
-        # Train model
-        self.model = lgb.LGBMRegressor(n_estimators=100, learning_rate=0.05)
-        self.model.fit(X, y)
+            # Train model
+            self.model = lgb.LGBMRegressor(n_estimators=100, learning_rate=0.05)
+            self.model.fit(X, y)
+        except ImportError:
+            print("Warning: LightGBM not installed. Using fallback pricing.")
+            self.model = None
 
     def price(self, S: float, K: float, T: float, r_d: float, r_f: float,
               features: np.ndarray) -> float:
@@ -304,13 +335,12 @@ class LGBMPricer:
     def _tenor_to_years(self, tenor: str) -> float:
         """Convert tenor to years"""
         mapping = {
-            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
-            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
-            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
+            '1W': 1/52, '2W': 2/52, '3W': 3/52,
+            '1M': 1/12, '2M': 2/12, '3M': 3/12,
+            '4M': 4/12, '6M': 6/12, '9M': 9/12,
             '1Y': 1.0
         }
-        return mapping.get(tenor, 1 / 12)
-
+        return mapping.get(tenor, 1/12)
 
 # ==================== Strategy ====================
 class OptionsArbitrageStrategy:
@@ -326,7 +356,7 @@ class OptionsArbitrageStrategy:
                  delta_model: str = None):
         self.model_name = model_name
         self.use_iv_filter = use_iv_filter
-        self.delta_model = delta_model or Config.DELTA_MODEL  # Use config default if not specified
+        self.delta_model = delta_model or Config.DELTA_MODEL
         self.book = TradingBook()
         self.sabr_model = SABRModel()
         self.lgbm_model = LGBMPricer()
@@ -340,9 +370,25 @@ class OptionsArbitrageStrategy:
         self.hedges_log = []
         self.daily_stats = []
 
+    def _get_rates_for_pair(self, pair: str, market_data: MarketData) -> Tuple[float, float]:
+        """Get appropriate interest rates for currency pair"""
+        if pair == 'USDJPY':
+            r_d = market_data.rates.get('USD', 0.05)
+            r_f = market_data.rates.get('JPY', 0.01)
+        elif pair == 'GBPNZD':
+            r_d = market_data.rates.get('GBP', 0.04)
+            r_f = market_data.rates.get('NZD', 0.03)
+        elif pair == 'USDCAD':
+            r_d = market_data.rates.get('USD', 0.05)
+            r_f = market_data.rates.get('CAD', 0.04)
+        else:
+            r_d = 0.05
+            r_f = 0.01
+        return r_d, r_f
+
     def _calculate_delta(self, spot: float, strike: float, T: float, r_d: float, r_f: float,
-                         vol: float, option_type: str, market_data: MarketData,
-                         pair: str, tenor: str) -> float:
+                        vol: float, option_type: str, market_data: MarketData,
+                        pair: str, tenor: str) -> float:
         """Calculate delta using the specified model"""
 
         if self.delta_model == 'BS' or self.delta_model == 'GK':
@@ -357,9 +403,9 @@ class OptionsArbitrageStrategy:
             # Calculate GVV-adjusted volatility for this strike
             moneyness = strike / spot
             if moneyness < 0.95:
-                smile_vol = vol + bf_25 - rr_25 / 2 + 0.002 * (0.95 - moneyness)
+                smile_vol = vol + bf_25 - rr_25/2 + 0.002 * (0.95 - moneyness)
             elif moneyness > 1.05:
-                smile_vol = vol + bf_25 + rr_25 / 2 + 0.002 * (moneyness - 1.05)
+                smile_vol = vol + bf_25 + rr_25/2 + 0.002 * (moneyness - 1.05)
             else:
                 skew_adjustment = rr_25 * (moneyness - 1.0) * 4
                 smile_vol = vol + bf_25 + skew_adjustment
@@ -371,8 +417,8 @@ class OptionsArbitrageStrategy:
             # SABR delta calculation
             if self.delta_sabr_model.alpha is None:
                 # Calibrate SABR if not done
-                strikes = np.array([spot * 0.9, spot, spot * 1.1])
-                vols = np.array([vol * 1.1, vol, vol * 1.1])
+                strikes = np.array([spot*0.9, spot, spot*1.1])
+                vols = np.array([vol*1.1, vol, vol*1.1])
                 self.delta_sabr_model.calibrate(strikes, vols, spot, T)
 
             # Calculate SABR vol for this strike
@@ -380,11 +426,11 @@ class OptionsArbitrageStrategy:
             if abs(F - strike) < 0.001:
                 sabr_vol = self.delta_sabr_model.alpha
             else:
-                z = (self.delta_sabr_model.nu / self.delta_sabr_model.alpha) * \
-                    (F * strike) ** ((1 - self.delta_sabr_model.beta) / 2) * np.log(F / strike)
-                x = np.log((np.sqrt(1 - 2 * self.delta_sabr_model.rho * z + z ** 2) + z -
-                            self.delta_sabr_model.rho) / (1 - self.delta_sabr_model.rho))
-                sabr_vol = self.delta_sabr_model.alpha * (z / x if abs(x) > 0.001 else 1.0)
+                z = (self.delta_sabr_model.nu/self.delta_sabr_model.alpha) * \
+                    (F*strike)**((1-self.delta_sabr_model.beta)/2) * np.log(F/strike)
+                x = np.log((np.sqrt(1 - 2*self.delta_sabr_model.rho*z + z**2) + z -
+                          self.delta_sabr_model.rho)/(1 - self.delta_sabr_model.rho))
+                sabr_vol = self.delta_sabr_model.alpha * (z/x if abs(x) > 0.001 else 1.0)
 
             # Use SABR vol for delta
             return BlackScholes.delta(spot, strike, T, r_d, r_f, sabr_vol, option_type)
@@ -415,7 +461,7 @@ class OptionsArbitrageStrategy:
         self._record_stats(market_data)
 
     def _find_opportunities(self, market_data: MarketData,
-                            historical_data: Dict[str, pd.DataFrame]) -> List[Dict]:
+                           historical_data: Dict[str, pd.DataFrame]) -> List[Dict]:
         """Find mispriced options to trade"""
         signals = []
 
@@ -424,20 +470,7 @@ class OptionsArbitrageStrategy:
                 continue
 
             spot = market_data.spot[pair]
-
-            # Get proper rates from curves for this pair
-            if pair == 'USDJPY':
-                r_d = market_data.rates.get('USD', 0.05)
-                r_f = market_data.rates.get('JPY', 0.01)
-            elif pair == 'GBPNZD':
-                r_d = market_data.rates.get('GBP', 0.04)
-                r_f = market_data.rates.get('NZD', 0.03)
-            elif pair == 'USDCAD':
-                r_d = market_data.rates.get('USD', 0.05)
-                r_f = market_data.rates.get('CAD', 0.04)
-            else:
-                r_d = 0.05
-                r_f = 0.01
+            r_d, r_f = self._get_rates_for_pair(pair, market_data)
 
             # Check IV filter if enabled
             if self.use_iv_filter and pair in historical_data:
@@ -467,33 +500,50 @@ class OptionsArbitrageStrategy:
                             spot, adj_delta, T, r_d, r_f, atm_vol, option_type
                         )
 
-                        # Get market implied vol (from smile)
-                        market_vol = self._get_smile_vol(
-                            market_data, pair, tenor, strike / spot
-                        )
-
-                        # Calculate market price using Black-Scholes
-                        market_price = BlackScholes.price(
-                            spot, strike, T, r_d, r_f, market_vol, option_type
-                        )
-
-                        # Calculate model price
-                        model_price = self._calculate_model_price(
-                            market_data, pair, spot, strike, T, r_d, r_f,
-                            tenor, option_type, historical_data
-                        )
+                        # For GVV model: compare smile-adjusted price vs flat ATM vol price
+                        # For other models: compare model price vs market smile price
+                        if self.model_name == 'GVV':
+                            # Market price with flat ATM vol (no smile)
+                            market_price = BlackScholes.price(
+                                spot, strike, T, r_d, r_f, atm_vol, option_type
+                            )
+                            # GVV price with smile adjustment
+                            model_price = self._calculate_model_price(
+                                market_data, pair, spot, strike, T, r_d, r_f,
+                                tenor, option_type, historical_data
+                            )
+                        else:
+                            # Get market implied vol from smile
+                            market_vol = self._get_smile_vol(
+                                market_data, pair, tenor, strike/spot
+                            )
+                            # Market price with smile
+                            market_price = BlackScholes.price(
+                                spot, strike, T, r_d, r_f, market_vol, option_type
+                            )
+                            # Model price
+                            model_price = self._calculate_model_price(
+                                market_data, pair, spot, strike, T, r_d, r_f,
+                                tenor, option_type, historical_data
+                            )
 
                         # Check for mispricing
                         if market_price > 0:
                             mispricing = (model_price - market_price) / market_price
 
-                            if abs(mispricing) > Config.MISPRICING_THRESHOLD:
+                            # Lower threshold for GVV to generate more signals
+                            threshold = Config.MISPRICING_THRESHOLD * 0.5 if self.model_name == 'GVV' else Config.MISPRICING_THRESHOLD
+
+                            if abs(mispricing) > threshold:
                                 # Apply IV filter
                                 if self.use_iv_filter:
                                     if mispricing > 0 and atm_vol < iv_ma:
                                         continue  # Skip long if IV below MA
                                     if mispricing < 0 and atm_vol > iv_ma:
                                         continue  # Skip short if IV above MA
+
+                                # Use appropriate vol for the signal
+                                signal_vol = atm_vol if self.model_name == 'GVV' else market_vol
 
                                 signal = {
                                     'pair': pair,
@@ -505,8 +555,10 @@ class OptionsArbitrageStrategy:
                                     'model_price': model_price,
                                     'mispricing': mispricing,
                                     'direction': 1 if mispricing > 0 else -1,
-                                    'vol': market_vol,
-                                    'delta': delta
+                                    'vol': signal_vol,
+                                    'delta': delta,
+                                    'r_d': r_d,
+                                    'r_f': r_f
                                 }
                                 signals.append(signal)
 
@@ -516,9 +568,9 @@ class OptionsArbitrageStrategy:
         return signals[:max_new]
 
     def _calculate_model_price(self, market_data: MarketData, pair: str,
-                               S: float, K: float, T: float, r_d: float, r_f: float,
-                               tenor: str, option_type: str,
-                               historical_data: Dict[str, pd.DataFrame]) -> float:
+                              S: float, K: float, T: float, r_d: float, r_f: float,
+                              tenor: str, option_type: str,
+                              historical_data: Dict[str, pd.DataFrame]) -> float:
         """Calculate theoretical price using selected model"""
 
         if self.model_name == 'GVV':
@@ -531,8 +583,8 @@ class OptionsArbitrageStrategy:
             atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
             # Calibrate SABR if needed
             if self.sabr_model.alpha is None:
-                strikes = np.array([S * 0.9, S, S * 1.1])
-                vols = np.array([atm_vol * 1.1, atm_vol, atm_vol * 1.1])
+                strikes = np.array([S*0.9, S, S*1.1])
+                vols = np.array([atm_vol*1.1, atm_vol, atm_vol*1.1])
                 self.sabr_model.calibrate(strikes, vols, S, T)
             return self.sabr_model.price(S, K, T, r_d, r_f, atm_vol, option_type)
 
@@ -548,7 +600,7 @@ class OptionsArbitrageStrategy:
             return BlackScholes.price(S, K, T, r_d, r_f, atm_vol, option_type)
 
     def _get_smile_vol(self, market_data: MarketData, pair: str,
-                       tenor: str, moneyness: float) -> float:
+                      tenor: str, moneyness: float) -> float:
         """Get implied vol from smile for given moneyness"""
         atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
         rr_25 = market_data.rr_25[pair].get(tenor, 0)
@@ -556,30 +608,55 @@ class OptionsArbitrageStrategy:
 
         # Simple smile interpolation
         if moneyness < 0.95:  # OTM put
-            return atm_vol + bf_25 - rr_25 / 2
+            return atm_vol + bf_25 - rr_25/2
         elif moneyness > 1.05:  # OTM call
-            return atm_vol + bf_25 + rr_25 / 2
+            return atm_vol + bf_25 + rr_25/2
         else:  # Near ATM
             skew = rr_25 * (moneyness - 1.0) * 4
             return atm_vol + bf_25 + skew
 
     def _execute_trades(self, signals: List[Dict], market_data: MarketData):
-        """Execute trades based on signals"""
+        """Execute trades based on signals with realistic transaction costs"""
         for signal in signals:
-            # Check margin/capital
-            premium = signal['market_price'] * signal['spot'] * abs(signal['direction'])
+            # Get rates from signal
+            r_d = signal['r_d']
+            r_f = signal['r_f']
 
+            # Calculate option price with transaction costs
+            T = self._tenor_to_years(signal['tenor'])
+            is_buy = signal['direction'] > 0
+
+            # Get price with vol spread
+            trade_price, vol_cost = BlackScholes.price_with_vol_spread(
+                signal['spot'], signal['strike'], T, r_d, r_f,
+                signal['vol'], signal['option_type'], signal['tenor'], is_buy
+            )
+
+            # Calculate notional and total transaction costs
+            notional = signal['spot'] * abs(signal['direction'])
+
+            # Add brokerage and clearing costs
+            brokerage_cost = notional * Config.TRANSACTION_COSTS['brokerage']
+            clearing_cost = notional * Config.TRANSACTION_COSTS['clearing']
+            total_transaction_cost = vol_cost * notional + brokerage_cost + clearing_cost
+
+            # Total premium including all costs
+            if is_buy:
+                total_premium = trade_price * notional + total_transaction_cost
+            else:
+                total_premium = trade_price * notional - total_transaction_cost
+
+            # Check margin/capital
             if signal['direction'] > 0:  # Buying
-                if self.book.cash < premium:
+                if self.book.cash < total_premium:
                     continue  # Not enough cash
             else:  # Selling (need margin)
-                required_margin = premium * 0.2  # 20% margin for short
+                required_margin = total_premium * 0.2  # 20% margin for short
                 if self.book.used_margin + required_margin > Config.INITIAL_CAPITAL * Config.MAX_LEVERAGE:
                     continue  # Exceeds leverage limit
 
             # Create position
-            T = self._tenor_to_years(signal['tenor'])
-            expiry = market_data.date + pd.Timedelta(days=int(T * 365))
+            expiry = market_data.date + pd.Timedelta(days=int(T*365))
 
             position = OptionPosition(
                 entry_date=market_data.date,
@@ -588,10 +665,11 @@ class OptionsArbitrageStrategy:
                 strike=signal['strike'],
                 option_type=signal['option_type'],
                 position_size=signal['direction'],
-                entry_price=signal['market_price'],
+                entry_price=trade_price,
                 entry_spot=signal['spot'],
                 entry_vol=signal['vol'],
-                model_used=self.model_name
+                model_used=self.model_name,
+                transaction_costs=total_transaction_cost
             )
 
             # Update greeks
@@ -606,13 +684,14 @@ class OptionsArbitrageStrategy:
 
             # Add to book
             self.book.options.append(position)
+            self.book.total_transaction_costs += total_transaction_cost
 
             # Update cash/margin
             if signal['direction'] > 0:
-                self.book.cash -= premium * (1 + Config.OPTION_SPREAD)
+                self.book.cash -= total_premium
             else:
-                self.book.cash += premium * (1 - Config.OPTION_SPREAD)
-                self.book.used_margin += premium * 0.2
+                self.book.cash += trade_price * notional - total_transaction_cost
+                self.book.used_margin += total_premium * 0.2
 
             # Log trade
             self.trades_log.append({
@@ -621,32 +700,45 @@ class OptionsArbitrageStrategy:
                 'strike': signal['strike'],
                 'option_type': signal['option_type'],
                 'direction': signal['direction'],
-                'premium': premium,
+                'premium': trade_price * notional,
+                'transaction_costs': total_transaction_cost,
                 'mispricing': signal['mispricing']
             })
 
     def _delta_hedge(self, market_data: MarketData):
         """Delta hedge the portfolio to stay within limits"""
-        net_delta = self.book.get_net_delta()
+        for pair in Config.PAIRS:
+            if pair not in market_data.spot:
+                continue
 
-        if abs(net_delta) > Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL:
-            # Need to hedge
-            hedge_amount = -net_delta
+            net_delta = self.book.get_net_delta(pair)
 
-            # Execute spot hedge (simplified - assumes single pair)
-            spot_price = list(market_data.spot.values())[0]
-            hedge_cost = abs(hedge_amount) * spot_price * Config.SPOT_SPREAD
+            if abs(net_delta) > Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL:
+                # Need to hedge
+                hedge_amount = -net_delta
+                spot_price = market_data.spot[pair]
 
-            self.book.spot_hedge += hedge_amount
-            self.book.cash -= hedge_cost
+                # Calculate transaction cost for spot hedge
+                spot_spread = Config.TRANSACTION_COSTS['spot'].get(pair, 0.0002)
+                hedge_cost = abs(hedge_amount) * spot_price * spot_spread
 
-            # Log hedge
-            self.hedges_log.append({
-                'date': market_data.date,
-                'hedge_amount': hedge_amount,
-                'spot_price': spot_price,
-                'cost': hedge_cost
-            })
+                # Update spot hedge position
+                if pair not in self.book.spot_hedge:
+                    self.book.spot_hedge[pair] = 0
+                self.book.spot_hedge[pair] += hedge_amount
+
+                # Update cash and costs
+                self.book.cash -= hedge_cost
+                self.book.total_transaction_costs += hedge_cost
+
+                # Log hedge
+                self.hedges_log.append({
+                    'date': market_data.date,
+                    'pair': pair,
+                    'hedge_amount': hedge_amount,
+                    'spot_price': spot_price,
+                    'cost': hedge_cost
+                })
 
     def _update_positions(self, market_data: MarketData):
         """Update existing positions with current market data"""
@@ -662,7 +754,7 @@ class OptionsArbitrageStrategy:
                 else:
                     payoff = max(0, pos.strike - spot)
 
-                pos.pnl = (payoff - pos.entry_price) * pos.position_size * pos.entry_spot
+                pos.pnl = (payoff - pos.entry_price) * pos.position_size * pos.entry_spot - pos.transaction_costs
                 self.book.cash += payoff * pos.position_size * pos.entry_spot
 
                 if pos.position_size < 0:  # Release margin for shorts
@@ -674,21 +766,9 @@ class OptionsArbitrageStrategy:
                 spot = market_data.spot[pos.pair]
                 T = (pos.expiry_date - market_data.date).days / 365
                 vol = self._get_smile_vol(market_data, pos.pair,
-                                          self._years_to_tenor(T), pos.strike / spot)
+                                         self._years_to_tenor(T), pos.strike/spot)
 
-                # Get proper rates for the pair
-                if pos.pair == 'USDJPY':
-                    r_d = market_data.rates.get('USD', 0.05)
-                    r_f = market_data.rates.get('JPY', 0.01)
-                elif pos.pair == 'GBPNZD':
-                    r_d = market_data.rates.get('GBP', 0.04)
-                    r_f = market_data.rates.get('NZD', 0.03)
-                elif pos.pair == 'USDCAD':
-                    r_d = market_data.rates.get('USD', 0.05)
-                    r_f = market_data.rates.get('CAD', 0.04)
-                else:
-                    r_d = 0.05
-                    r_f = 0.01
+                r_d, r_f = self._get_rates_for_pair(pos.pair, market_data)
 
                 pos.current_delta = self._calculate_delta(
                     spot, pos.strike, T, r_d, r_f, vol, pos.option_type,
@@ -700,7 +780,7 @@ class OptionsArbitrageStrategy:
                 pos.current_value = BlackScholes.price(
                     spot, pos.strike, T, r_d, r_f, vol, pos.option_type
                 )
-                pos.pnl = (pos.current_value - pos.entry_price) * pos.position_size * pos.entry_spot
+                pos.pnl = (pos.current_value - pos.entry_price) * pos.position_size * pos.entry_spot - pos.transaction_costs
 
         # Remove expired positions
         for i in reversed(positions_to_remove):
@@ -720,41 +800,41 @@ class OptionsArbitrageStrategy:
     def _record_stats(self, market_data: MarketData):
         """Record daily statistics"""
         total_value = self.book.cash + sum(pos.current_value * pos.position_size * pos.entry_spot
-                                           for pos in self.book.options)
+                                          for pos in self.book.options)
 
         self.equity_curve.append({
             'date': market_data.date,
             'equity': total_value,
             'cash': self.book.cash,
             'num_positions': self.book.get_num_positions(),
-            'net_delta': self.book.get_net_delta(),
+            'net_delta': sum(self.book.get_net_delta(pair) for pair in Config.PAIRS),
             'net_vega': self.book.get_net_vega(),
-            'used_margin': self.book.used_margin
+            'used_margin': self.book.used_margin,
+            'total_transaction_costs': self.book.total_transaction_costs
         })
 
     def _tenor_to_years(self, tenor: str) -> float:
         """Convert tenor to years"""
         mapping = {
-            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
-            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
-            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
+            '1W': 1/52, '2W': 2/52, '3W': 3/52,
+            '1M': 1/12, '2M': 2/12, '3M': 3/12,
+            '4M': 4/12, '6M': 6/12, '9M': 9/12,
             '1Y': 1.0
         }
-        return mapping.get(tenor, 1 / 12)
+        return mapping.get(tenor, 1/12)
 
     def _years_to_tenor(self, years: float) -> str:
         """Convert years to nearest tenor"""
-        if years <= 1 / 52:
+        if years <= 1/52:
             return '1W'
-        elif years <= 1 / 12:
+        elif years <= 1/12:
             return '1M'
-        elif years <= 3 / 12:
+        elif years <= 3/12:
             return '3M'
-        elif years <= 6 / 12:
+        elif years <= 6/12:
             return '6M'
         else:
             return '1Y'
-
 
 # ==================== Data Loader ====================
 class DataLoader:
@@ -792,14 +872,14 @@ class DataLoader:
         if date_curves.empty:
             return {'USD': 0.05, 'JPY': 0.01, 'GBP': 0.04, 'NZD': 0.03, 'CAD': 0.04}
 
-        # Get 3M rate as representative (could use different tenors for different currencies)
+        # Get 3M rate as representative
         rates = {}
 
         # USD rate from the curves
         usd_3m = date_curves[date_curves['tenor'] == '3M']['interpolated_rate'].values
         rates['USD'] = usd_3m[0] if len(usd_3m) > 0 else 0.05
 
-        # For other currencies, apply spreads (simplified - in practice would have separate curves)
+        # For other currencies, apply spreads (simplified)
         rates['JPY'] = rates['USD'] - 0.04  # Japan typically lower rates
         rates['GBP'] = rates['USD'] - 0.01  # UK similar to US
         rates['NZD'] = rates['USD'] - 0.02  # NZ slightly lower
@@ -808,51 +888,8 @@ class DataLoader:
         return rates
 
     @staticmethod
-    def get_forward_points(curves_data: pd.DataFrame, date: pd.Timestamp,
-                           pair: str, tenor: str) -> float:
-        """Calculate forward points from interest rate differential"""
-        if curves_data is None:
-            return 0.0
-
-        # Get rates for both currencies
-        rates = DataLoader.get_rates_from_curves(curves_data, date)
-
-        # Parse currency pair
-        if pair == 'USDJPY':
-            r_base = rates['USD']
-            r_quote = rates['JPY']
-        elif pair == 'GBPNZD':
-            r_base = rates['GBP']
-            r_quote = rates['NZD']
-        elif pair == 'USDCAD':
-            r_base = rates['USD']
-            r_quote = rates['CAD']
-        else:
-            return 0.0
-
-        # Get tenor in years
-        tenor_map = {
-            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
-            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
-            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
-            '1Y': 1.0
-        }
-        T = tenor_map.get(tenor, 1 / 12)
-
-        # Calculate forward points (simplified)
-        # Forward = Spot * exp((r_base - r_quote) * T)
-        # Forward points = Forward - Spot = Spot * (exp((r_base - r_quote) * T) - 1)
-        # This is approximate - actual market forward points include bid-ask and other factors
-
-        # For now, return simplified calculation
-        # In practice, would read from market data
-        forward_factor = np.exp((r_base - r_quote) * T) - 1
-
-        return forward_factor
-
-    @staticmethod
     def prepare_market_data(fx_data: pd.DataFrame, date: pd.Timestamp,
-                            curves_data: pd.DataFrame = None) -> MarketData:
+                           curves_data: pd.DataFrame = None) -> MarketData:
         """Prepare market data for a specific date"""
         if date not in fx_data.index:
             return None
@@ -908,6 +945,8 @@ class DataLoader:
 
         return market
 
+# Rest of the code remains the same (Backtester class and main function)...
+# [Continue with the rest of the original code from line 906 onwards]
 
 # ==================== Backtester ====================
 class Backtester:
@@ -919,7 +958,7 @@ class Backtester:
         self.results = {}
 
     def run_all_models(self, start_date: pd.Timestamp, end_date: pd.Timestamp,
-                       delta_model: str = None):
+                      delta_model: str = None):
         """Run backtest for all models"""
         models = ['GK', 'GVV', 'SABR', 'LGBM']
 
@@ -932,15 +971,22 @@ class Backtester:
             self._run_single_backtest(strategy, start_date, end_date)
             self.results[f'{model}_delta{delta_model}'] = strategy.equity_curve
 
-        # Also run GK with IV filter
+        # Also run GK with IV filter using default delta model
         print(f"\nRunning backtest for GK with IV filter (Delta model: {delta_model})...")
         strategy = OptionsArbitrageStrategy(model_name='GK', use_iv_filter=True,
-                                            delta_model=delta_model)
+                                           delta_model=delta_model)
         self._run_single_backtest(strategy, start_date, end_date)
         self.results[f'GK_IVFilter_delta{delta_model}'] = strategy.equity_curve
 
+        # Additional: GK with IV filter using SABR delta model
+        print(f"\nRunning backtest for GK with IV filter (Delta model: SABR)...")
+        strategy = OptionsArbitrageStrategy(model_name='GK', use_iv_filter=True,
+                                           delta_model='SABR')
+        self._run_single_backtest(strategy, start_date, end_date)
+        self.results[f'GK_IVFilter_deltaSABR'] = strategy.equity_curve
+
     def _run_single_backtest(self, strategy: OptionsArbitrageStrategy,
-                             start_date: pd.Timestamp, end_date: pd.Timestamp):
+                            start_date: pd.Timestamp, end_date: pd.Timestamp):
         """Run backtest for a single strategy"""
         dates = self.fx_data.index[(self.fx_data.index >= start_date) &
                                    (self.fx_data.index <= end_date)]
@@ -971,7 +1017,7 @@ class Backtester:
                             new_row[f'atm_vol_{tenor}'] = market_data.atm_vols[pair][tenor]
 
                     historical_data[pair] = pd.concat([historical_data[pair], new_row],
-                                                      ignore_index=True)
+                                                     ignore_index=True)
 
             # Run daily strategy
             strategy.run_daily(market_data, historical_data)
@@ -987,13 +1033,18 @@ class Backtester:
             df = pd.DataFrame(equity_curve)
             returns = df['equity'].pct_change().dropna()
 
+            # Calculate transaction costs impact
+            total_costs = df['total_transaction_costs'].iloc[-1] if 'total_transaction_costs' in df else 0
+
             metrics.append({
                 'Model': model,
                 'Total Return': (df['equity'].iloc[-1] / Config.INITIAL_CAPITAL - 1) * 100,
                 'Sharpe Ratio': returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0,
                 'Max Drawdown': ((df['equity'] / df['equity'].expanding().max() - 1).min()) * 100,
                 'Avg Positions': df['num_positions'].mean(),
-                'Total Trades': len([e for e in equity_curve if e['num_positions'] > 0])
+                'Total Trades': len([e for e in equity_curve if e['num_positions'] > 0]),
+                'Transaction Costs': total_costs,
+                'Costs as % of Capital': (total_costs / Config.INITIAL_CAPITAL) * 100
             })
 
         return pd.DataFrame(metrics)
@@ -1029,38 +1080,39 @@ class Backtester:
         ax.legend()
         ax.grid(True)
 
-        # Number of positions
+        # Rolling Delta Exposure
         ax = axes[1, 0]
         for model, equity_curve in self.results.items():
             if equity_curve:
                 df = pd.DataFrame(equity_curve)
-                ax.plot(df['date'], df['num_positions'], label=model)
-        ax.set_title('Number of Positions')
+                ax.plot(df['date'], df['net_delta'], label=model, alpha=0.7)
+        ax.set_title('Rolling Delta Exposure')
         ax.set_xlabel('Date')
-        ax.set_ylabel('Positions')
+        ax.set_ylabel('Net Delta ($)')
+        ax.axhline(y=Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL,
+                   color='r', linestyle='--', alpha=0.5, label='Max Delta Limit')
+        ax.axhline(y=-Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL,
+                   color='r', linestyle='--', alpha=0.5)
+        ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
         ax.legend()
         ax.grid(True)
 
-        # Delta exposure
+        # Transaction costs over time
         ax = axes[1, 1]
         for model, equity_curve in self.results.items():
             if equity_curve:
                 df = pd.DataFrame(equity_curve)
-                ax.plot(df['date'], df['net_delta'], label=model)
-        ax.set_title('Net Delta Exposure')
+                if 'total_transaction_costs' in df:
+                    ax.plot(df['date'], df['total_transaction_costs'], label=model)
+        ax.set_title('Cumulative Transaction Costs')
         ax.set_xlabel('Date')
-        ax.set_ylabel('Delta')
+        ax.set_ylabel('Transaction Costs ($)')
         ax.legend()
         ax.grid(True)
-        ax.axhline(y=Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL,
-                   color='r', linestyle='--', label='Max Delta')
-        ax.axhline(y=-Config.MAX_DELTA_EXPOSURE * Config.INITIAL_CAPITAL,
-                   color='r', linestyle='--')
 
         plt.tight_layout()
         plt.savefig(Config.RESULTS_DIR / 'backtest_results.png')
         plt.show()
-
 
 # ==================== Main Execution ====================
 def main():
@@ -1086,38 +1138,32 @@ def main():
         print(f"Loaded {len(curves_data)} curve points")
         print(f"Tenors available: {sorted(curves_data['tenor'].unique())}")
     else:
-        print("Discount curves not found. Generating them now...")
-        try:
-            # Import and run the curves generation
-            from src.curves import process_discount_curves
-
-            # Generate the curves
-            curves_data_generated = process_discount_curves(
-                data_dir=Config.DATA_DIR / "FRED",
-                output_dir=Config.DATA_DIR,
-                plot_dir=Config.RESULTS_DIR
-            )
-
-            # Try loading again
-            curves_data = DataLoader.load_curves_data(Config.CURVES_PATH)
-            if curves_data is not None:
-                print(f"Successfully generated and loaded {len(curves_data)} curve points")
-                print(f"Tenors available: {sorted(curves_data['tenor'].unique())}")
-            else:
-                print("Warning: Failed to generate curves, using default rates")
-        except Exception as e:
-            print(f"Error generating discount curves: {e}")
-            print("Warning: Using default rates instead of curves")
+        print("Discount curves not found. Using default rates.")
 
     # Split data
     n_days = len(fx_data)
-    train_end = int(n_days * 0.8)
+    train_end = int(n_days * 0.85)
 
     train_data = fx_data.iloc[:train_end]
     test_data = fx_data.iloc[train_end:]
 
     print(f"\nTrain period: {train_data.index[0]} to {train_data.index[-1]}")
     print(f"Test period: {test_data.index[0]} to {test_data.index[-1]}")
+
+    # Display transaction cost structure
+    print("\n" + "=" * 80)
+    print("TRANSACTION COST STRUCTURE")
+    print("=" * 80)
+    print("\nSpot FX Spreads:")
+    for pair, spread in Config.TRANSACTION_COSTS['spot'].items():
+        print(f"  {pair}: {spread*10000:.1f} pips")
+
+    print("\nOption Volatility Spreads:")
+    for tenor, spread in Config.TRANSACTION_COSTS['options'].items():
+        print(f"  {tenor}: {spread*100:.0f} bps")
+
+    print(f"\nBrokerage: {Config.TRANSACTION_COSTS['brokerage']*10000:.1f} bps")
+    print(f"Clearing: {Config.TRANSACTION_COSTS['clearing']*10000:.1f} bps")
 
     # Run backtests with curves data
     print(f"\nUsing delta model: {Config.DELTA_MODEL}")
@@ -1141,7 +1187,6 @@ def main():
 
     print("\n✅ Analysis complete!")
     print(f"Results saved to {Config.RESULTS_DIR}")
-
 
 if __name__ == "__main__":
     main()
