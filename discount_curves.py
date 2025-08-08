@@ -94,7 +94,7 @@ print("✅ Discount curve saved to data/discount_curves.parquet")
 # -----------------------------
 # 3D Plot: Yield Curves Over Time
 # -----------------------------
-os.makedirs("plots", exist_ok=True)
+os.makedirs("results", exist_ok=True)
 pivot = df_discount.pivot_table(index="date", columns="tenor_years", values="interpolated_rate")
 dates = mdates.date2num(pivot.index)
 tenors = pivot.columns.values
@@ -117,8 +117,8 @@ fig.update_layout(
     autosize=True
 )
 
-fig.write_html("plots/discount_curves_3d.html")
-print("✅ 3D plot saved to plots/discount_curves_3d.html")
+# fig.write_html("results/discount_curves_3d.html")
+# print("✅ 3D plot saved to plots/discount_curves_3d.html")
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -148,6 +148,6 @@ fig.autofmt_xdate()
 
 plt.colorbar(surf, shrink=0.5, aspect=10, label="Interpolated Rate")
 plt.tight_layout()
-plt.savefig("plots/discount_curves_3d.png")
+plt.savefig("results/discount_curves_3d.png")
 plt.close()
-print("✅ PNG plot saved to plots/discount_curves_3d.png")
+print("✅ PNG plot saved to results/discount_curves_3d.png")
