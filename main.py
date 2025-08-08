@@ -27,17 +27,16 @@ class Config:
 
     # Trading parameters
     INITIAL_CAPITAL = 10_000_000
-    MAX_LEVERAGE = 5
+    MAX_LEVERAGE = 10
     MAX_POSITIONS = 500
-    MAX_DELTA_EXPOSURE = 0.03  # 3% max delta at end of day
-    MISPRICING_THRESHOLD = 0.02  # 2% mispricing to trade
+    MAX_DELTA_EXPOSURE = 0.04  # 4% max delta at end of day
+    MISPRICING_THRESHOLD = 0.025  # 2.5% mispricing to trade
 
     # Transaction costs
     SPOT_SPREAD = 0.0002  # 2 bps
     OPTION_SPREAD = 0.0005  # 5 bps
 
     # Model parameters
-    LGBM_TRAINING_YEARS = 5
     IV_MA_DAYS = 20  # For IV filter strategy
     DELTA_MODEL = 'BS'  # Model for delta calculation: 'BS', 'GK', 'GVV', 'SABR'
 
@@ -978,8 +977,8 @@ class Backtester:
                 'Total Return': (df['equity'].iloc[-1] / Config.INITIAL_CAPITAL - 1) * 100,
                 'Sharpe Ratio': returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0,
                 'Max Drawdown': ((df['equity'] / df['equity'].expanding().max() - 1).min()) * 100,
-                'Avg Positions': df['num_positions'].mean(),
-                'Total Trades': len([e for e in equity_curve if e['num_positions'] > 0])
+                # 'Avg Positions': df['num_positions'].mean(),
+                # 'Total Trades': len([e for e in equity_curve if e['num_positions'] > 0])
             })
 
         return pd.DataFrame(metrics)
