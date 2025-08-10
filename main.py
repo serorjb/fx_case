@@ -185,6 +185,43 @@ class BlackScholes:
         return K
 
 
+
+class GarmanKohlhagen:
+    """Garman-Kohlhagen model for FX options"""
+
+    @staticmethod
+    def price(S: float, K: float, T: float, r_d: float, r_f: float,
+              sigma: float, option_type: str) -> float:
+        """Price FX option using Garman-Kohlhagen"""
+        if T <= 0:
+            return max(0, S - K) if option_type == 'call' else max(0, K - S)
+
+        from scipy.stats import norm
+
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+
+        if option_type == 'call':
+            return S * np.exp(-r_f * T) * norm.cdf(d1) - K * np.exp(-r_d * T) * norm.cdf(d2)
+        else:
+            return K * np.exp(-r_d * T) * norm.cdf(-d2) - S * np.exp(-r_f * T) * norm.cdf(-d1)
+
+    @staticmethod
+    def delta(S: float, K: float, T: float, r_d: float, r_f: float,
+              sigma: float, option_type: str) -> float:
+        """Calculate delta for FX option using Garman-Kohlhagen"""
+        if T <= 0:
+            return 1.0 if option_type == 'call' and S > K else 0.0
+
+        from scipy.stats import norm
+
+        d1 = (np.log(S / K) + (r_d - r_f + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+
+        if option_type == 'call':
+            return np.exp(-r_f * T) * norm.cdf(d1)
+        else:
+            return -np.exp(-r_f * T) * norm.cdf(-d1)
+
 class GVVModel:
     """Simplified GVV model implementation"""
 
@@ -238,78 +275,31 @@ class SABRModel:
 
         return BlackScholes.price(S, K, T, r_d, r_f, sabr_vol, option_type)
 
-
-# ==================== ML Model ====================
-class LGBMPricer:
-    """LightGBM model for option pricing"""
-
-    def __init__(self, training_years: int = 5):
-        self.training_years = training_years
-        self.model = None
-        self.last_train_date = None
-
-    def prepare_features(self, market_data: MarketData, pair: str,
-                         strike: float, tenor: str, option_type: str,
-                         historical_data: pd.DataFrame = None) -> np.ndarray:
-        """Prepare features for ML model"""
-        spot = market_data.spot[pair]
-        T = self._tenor_to_years(tenor)
-
-        # Basic features
-        features = [
-            T,  # Time to maturity
-            strike / spot,  # Moneyness
-            market_data.rates.get('USD', 0.05),  # Domestic rate
-            market_data.rates.get('JPY', 0.01),  # Foreign rate
-            market_data.atm_vols[pair].get(tenor, 0.1),  # ATM vol
-            market_data.rr_25[pair].get(tenor, 0),  # Risk reversal
-            market_data.bf_25[pair].get(tenor, 0),  # Butterfly
-        ]
-
-        # Add historical vol if available
-        if historical_data is not None and len(historical_data) > 20:
-            returns = np.log(historical_data['spot'] / historical_data['spot'].shift(1))
-            realized_vol = returns.tail(20).std() * np.sqrt(252)
-            features.append(realized_vol)
-        else:
-            features.append(0.1)  # Default RV
-
-        # Add other model prices as features (would be calculated separately)
-        features.extend([0.0, 0.0, 0.0])  # Placeholder for GK, GVV, SABR prices
-
-        return np.array(features).reshape(1, -1)
-
-    def train(self, training_data: pd.DataFrame):
-        """Train the model on historical data"""
-        # Simplified - would implement full training logic
-        import lightgbm as lgb
-
-        # Prepare training data
-        X = training_data[['moneyness', 'time_to_maturity', 'atm_vol', 'rr', 'bf']].values
-        y = training_data['option_price'].values
-
-        # Train model
-        self.model = lgb.LGBMRegressor()
-        self.model.fit(X, y)
-
-    def price(self, S: float, K: float, T: float, r_d: float, r_f: float,
-              features: np.ndarray) -> float:
-        """Price option using trained model"""
-        if self.model is None:
-            # Fallback to Black-Scholes if not trained
-            return BlackScholes.price(S, K, T, r_d, r_f, 0.1, 'call')
-
-        return self.model.predict(features)[0]
-
-    def _tenor_to_years(self, tenor: str) -> float:
-        """Convert tenor to years"""
-        mapping = {
-            '1W': 1 / 52, '2W': 2 / 52, '3W': 3 / 52,
-            '1M': 1 / 12, '2M': 2 / 12, '3M': 3 / 12,
-            '4M': 4 / 12, '6M': 6 / 12, '9M': 9 / 12,
-            '1Y': 1.0
-        }
-        return mapping.get(tenor, 1 / 12)
+def get_gk_rates_from_fx_row(row: pd.Series, pair: str, tenor: str) -> Tuple[float, float]:
+    """
+    Extract domestic and foreign interest rates for GK model from fx_data row.
+    Assumes columns like 'USDJPY3M Curncy' for basis/forward points.
+    """
+    # Example: For USDJPY, domestic is USD, foreign is JPY
+    if pair == 'USDJPY':
+        r_d_col = f'USDJPY{tenor} Curncy'
+        r_f_col = f'JPY{tenor} Curncy'  # If available, otherwise estimate
+        r_d = row.get(r_d_col, 0.05) / 100  # Convert bps to rate
+        r_f = 0.01  # Fallback if JPY basis not available
+    elif pair == 'GBPNZD':
+        r_d_col = f'GBPNZD{tenor} Curncy'
+        r_f_col = f'NZD{tenor} Curncy'
+        r_d = row.get(r_d_col, 0.04) / 100
+        r_f = 0.03
+    elif pair == 'USDCAD':
+        r_d_col = f'USDCAD{tenor} Curncy'
+        r_f_col = f'CAD{tenor} Curncy'
+        r_d = row.get(r_d_col, 0.05) / 100
+        r_f = 0.04
+    else:
+        r_d = 0.05
+        r_f = 0.01
+    return r_d, r_f
 
 
 # ==================== Strategy ====================
@@ -329,7 +319,6 @@ class OptionsArbitrageStrategy:
         self.delta_model = delta_model or Config.DELTA_MODEL  # Use config default if not specified
         self.book = TradingBook()
         self.sabr_model = SABRModel()
-        self.lgbm_model = LGBMPricer()
 
         # Initialize delta model if different from BS
         self.delta_sabr_model = SABRModel() if self.delta_model == 'SABR' else None
@@ -345,9 +334,11 @@ class OptionsArbitrageStrategy:
                          pair: str, tenor: str) -> float:
         """Calculate delta using the specified model"""
 
-        if self.delta_model == 'BS' or self.delta_model == 'GK':
+        if self.delta_model == 'BS':
             # Black-Scholes / Garman-Kohlhagen delta
             return BlackScholes.delta(spot, strike, T, r_d, r_f, vol, option_type)
+        if self.delta_model == 'GK':
+            return GarmanKohlhagen.delta(spot, strike, T, r_d, r_f, vol, option_type)
 
         elif self.delta_model == 'GVV':
             # GVV delta calculation
@@ -518,8 +509,15 @@ class OptionsArbitrageStrategy:
     def _calculate_model_price(self, market_data: MarketData, pair: str,
                                S: float, K: float, T: float, r_d: float, r_f: float,
                                tenor: str, option_type: str,
-                               historical_data: Dict[str, pd.DataFrame]) -> float:
+                               historical_data: Dict[str, pd.DataFrame],
+                               row: Optional[pd.Series] = None) -> float:
         """Calculate theoretical price using selected model"""
+
+        if self.model_name == 'GK':
+            atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
+            if row is not None:
+                r_d, r_f = get_gk_rates_from_fx_row(row, pair, tenor)
+            return GarmanKohlhagen.price(S, K, T, r_d, r_f, atm_vol, option_type)
 
         if self.model_name == 'GVV':
             rr_25 = market_data.rr_25[pair].get(tenor, 0)
@@ -535,13 +533,6 @@ class OptionsArbitrageStrategy:
                 vols = np.array([atm_vol * 1.1, atm_vol, atm_vol * 1.1])
                 self.sabr_model.calibrate(strikes, vols, S, T)
             return self.sabr_model.price(S, K, T, r_d, r_f, atm_vol, option_type)
-
-        elif self.model_name == 'LGBM':
-            features = self.lgbm_model.prepare_features(
-                market_data, pair, K, tenor, option_type,
-                historical_data.get(pair)
-            )
-            return self.lgbm_model.price(S, K, T, r_d, r_f, features)
 
         else:  # GK/Black-Scholes
             atm_vol = market_data.atm_vols[pair].get(tenor, 0.1)
@@ -918,7 +909,7 @@ class Backtester:
 
     def run_all_models(self, start_date: pd.Timestamp, end_date: pd.Timestamp):
         """Run backtest for GK, SABR, and GK with IV filter"""
-        models = ['GK', 'SABR']
+        models = ['BS', 'GVV', 'GK', 'SABR']
 
         for model in models:
             print(f"\nRunning backtest for {model}...")
@@ -1038,6 +1029,7 @@ def main():
     # Load FX data
     print("\nLoading FX data...")
     fx_data = DataLoader.load_fx_data(Config.FX_DATA_PATH)
+    print(fx_data.head(3).to_string())
     print(f"Loaded {len(fx_data)} days of data")
     print(f"Date range: {fx_data.index[0]} to {fx_data.index[-1]}")
 
